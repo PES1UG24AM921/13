@@ -2,7 +2,7 @@
 
 Project Overview
 
-The **Hospital Patient Record and Appointment Management System** is a software application designed to simplify and organize the management of patient records and hospital appointments.
+The **Hospital Management System** is a software application designed to simplify and organize the management of patient records and hospital appointments.
 
 The system provides a centralized platform for managing patient information, doctor details, medical records, and appointments while improving accessibility, organization, and efficiency.
 
@@ -15,7 +15,7 @@ Objectives
 - Maintain organized and secure healthcare records.
 - Reduce manual work involved in appointment and record management.
 
-User Roles
+## User Roles
 
 ### Patient
 - Register and log in.
