@@ -106,7 +106,7 @@ The system will implement appropriate authentication and authorization mechanism
 
 Security requirements and objectives will be documented in the SRS and SAD.
 
-##Project Status
+## Project Status
 
 **Status:** In Development
 
