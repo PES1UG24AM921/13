@@ -114,9 +114,9 @@ Security requirements and objectives will be documented in the SRS and SAD.
 
 | SRN | Member Name | Responsibility |
 |---|---|---|
-| PES1UG24AM435 | Krishna Kaushik Reddy K | SRS |
-| PES1UG24AM446 | Rolla N Harsha Vardhan | Implementation & Integration |
-| PES1UG24AM458 | Amulya P | UML & SAD|
+| PES1UG24AM435 | Krishna Kaushik Reddy K | Implementation Part 1 |
+| PES1UG24AM446 | Rolla N Harsha Vardhan | SRS |
+| PES1UG24AM458 | Amulya P | Implementation Part 2 & SAD|
 | PES1UG24AM921 | Rohan Agarwal | Testing & RTM |
 
 ## Course
