@@ -123,3 +123,11 @@ Security requirements and objectives will be documented in the SRS and SAD.
 
 **Software Engineering Project**
 
+
+## Local setup
+
+See [`SETUP_LOCAL.md`](SETUP_LOCAL.md) for macOS instructions to configure MySQL, the backend environment, development seed accounts, and the React frontend.
+
+## Frontend
+
+The React + Vite frontend uses a responsive dark navy and teal theme. To run it, follow the frontend section in `SETUP_LOCAL.md`.
