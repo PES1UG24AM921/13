@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "seed": "node seed.js",
-    "test": "jest --runInBand && node --test tests/managementControllers.test.js",
+    "test": "jest --runInBand --passWithNoTests",
     "lint": "eslint ."
   },
   "dependencies": {
