@@ -1,12 +1,12 @@
 import { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 
 export function Login() {
-  const { login } = useAuth(); const navigate = useNavigate();
+  const { login } = useAuth(); const navigate = useNavigate(); const location = useLocation();
   const [form,setForm] = useState({email:'',password:''}); const [error,setError] = useState(''); const [busy,setBusy] = useState(false);
   const change = (e) => setForm({...form,[e.target.name]:e.target.value});
-  const submit = async (e) => { e.preventDefault(); setError(''); setBusy(true); try { const user = await login(form); navigate(user.role === 'patient' ? '/dashboard' : '/dashboard'); } catch(err) { setError(err.message); } finally { setBusy(false); } };
+  const submit = async (e) => { e.preventDefault(); setError(''); setBusy(true); try { await login(form); navigate(location.state?.from || '/dashboard', { replace: true }); } catch(err) { setError(err.message); } finally { setBusy(false); } };
   return <AuthFrame><div className="auth-eyebrow"><span className="status-dot"/> YOUR CARE, CONNECTED</div><h1>Welcome<br/>back<span className="teal-dot">.</span></h1><p className="auth-subtitle">A clearer view of your health journey starts here.</p><form onSubmit={submit} className="auth-form"><label>Email address<input name="email" type="email" autoComplete="email" placeholder="you@example.com" value={form.email} onChange={change} required /></label><label>Password<input name="password" type="password" autoComplete="current-password" placeholder="Enter your password" value={form.password} onChange={change} required /></label>{error && <div className="alert error">{error}</div>}<button className="btn primary full" disabled={busy}>{busy?'Signing in…':'Sign in'} <span>↗</span></button></form><div className="auth-switch">New to Careflow? <Link to="/register">Create an account</Link></div><div className="auth-note">✧ &nbsp;Your information is protected and private.</div></AuthFrame>;
 }
 export function Register() {
