@@ -100,6 +100,19 @@ Testing will include:
 - Performance Testing
 - Usability Testing
 
+## Doctor profiles and availability API
+
+All doctor profile, doctor listing, and slot lookup endpoints require a bearer token for an active patient, doctor, or administrator account:
+
+- `GET /api/doctors` searches doctors and includes `slots` for the requested `date` (`YYYY-MM-DD`); omitted dates default to the current UTC date. Supports `q`, `specialty`, `limit`, and `offset`.
+- `GET /api/doctors/:doctorId` retrieves an active doctor's profile.
+- `GET /api/doctors/:doctorId/slots?date=YYYY-MM-DD` retrieves unbooked 30-minute slots for that date.
+- `POST /api/doctors/availability` creates an availability block.
+- `PUT /api/doctors/availability/:availabilityId` updates a block owned by the authenticated doctor.
+- `DELETE /api/doctors/availability/:availabilityId` deletes a block owned by the authenticated doctor.
+
+Availability creation and updates are restricted to doctor accounts. The body requires `dayOfWeek` (1-7) and `startTime` on a half-hour boundary; each block represents one 30-minute appointment. `effectiveFrom` defaults to today and `effectiveTo` may be omitted or `null`. Invalid dates, times, and overlapping blocks are rejected.
+
 ## Security
 
 The system will implement appropriate authentication and authorization mechanisms to protect patient and healthcare information.

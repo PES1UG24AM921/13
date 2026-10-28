@@ -1,4 +1,5 @@
 const pool = require('../db');
+const doctorModel = require('../models/doctorModel');
 
 const SLOT_MINUTES = 30;
 const TIME_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d(?::00)?$/;
@@ -45,10 +46,10 @@ function parsePositiveInteger(value) {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
-async function createAvailability(req, res) {
-  const { dayOfWeek, startTime } = req.body || {};
-  const effectiveFrom = req.body?.effectiveFrom || new Date().toISOString().slice(0, 10);
-  const effectiveTo = req.body?.effectiveTo ?? null;
+function parseAvailability(body) {
+  const { dayOfWeek, startTime } = body || {};
+  const effectiveFrom = body?.effectiveFrom || new Date().toISOString().slice(0, 10);
+  const effectiveTo = body?.effectiveTo ?? null;
   if (
     !Number.isInteger(dayOfWeek)
     || dayOfWeek < 1
@@ -59,17 +60,29 @@ async function createAvailability(req, res) {
     || (effectiveTo !== null && !isValidDate(effectiveTo))
     || (effectiveTo !== null && effectiveTo < effectiveFrom)
   ) {
-    return res.status(400).json({
-      error: 'Provide dayOfWeek (1-7), startTime (HH:mm on a half-hour), and valid effective dates.',
-    });
+    return { error: 'Provide dayOfWeek (1-7), startTime (HH:mm on a half-hour), and valid effective dates.' };
   }
 
   const normalizedStart = startTime.length === 5 ? `${startTime}:00` : startTime;
   const startMinutes = timeToMinutes(normalizedStart);
   if (startMinutes % SLOT_MINUTES !== 0 || startMinutes + SLOT_MINUTES > 24 * 60) {
-    return res.status(400).json({ error: 'Availability must start on a half-hour and fit within the day.' });
+    return { error: 'Availability must start on a half-hour and fit within the day.' };
   }
-  const endTime = minutesToTime(startMinutes + SLOT_MINUTES);
+  return {
+    value: {
+      dayOfWeek,
+      startTime: normalizedStart,
+      endTime: minutesToTime(startMinutes + SLOT_MINUTES),
+      effectiveFrom,
+      effectiveTo,
+    },
+  };
+}
+
+async function createAvailability(req, res) {
+  const parsed = parseAvailability(req.body);
+  if (!parsed.value) return res.status(400).json({ error: parsed.error });
+  const { dayOfWeek, startTime: normalizedStart, endTime, effectiveFrom, effectiveTo } = parsed.value;
 
   let connection;
   let transactionStarted = false;
@@ -78,42 +91,30 @@ async function createAvailability(req, res) {
     await connection.beginTransaction();
     transactionStarted = true;
 
-    const [doctors] = await connection.execute(
-      'SELECT user_id FROM doctors WHERE user_id = ? FOR UPDATE',
-      [req.user.id],
-    );
-    if (!doctors[0]) {
+    const doctor = await doctorModel.findDoctorForUpdate(connection, req.user.id);
+    if (!doctor) {
       await connection.rollback();
       transactionStarted = false;
       return res.status(404).json({ error: 'Doctor profile not found.' });
     }
 
-    const [overlaps] = await connection.execute(
-      `SELECT id FROM availability
-       WHERE doctor_id = ? AND day_of_week = ?
-         AND (effective_to IS NULL OR effective_to >= ?)
-         AND (? IS NULL OR effective_from <= ?)
-         AND start_time < ? AND end_time > ?
-       LIMIT 1 FOR UPDATE`,
-      [req.user.id, dayOfWeek, effectiveFrom, effectiveTo, effectiveTo, endTime, normalizedStart],
-    );
-    if (overlaps[0]) {
+    const overlaps = await doctorModel.findOverlappingAvailability(connection, {
+      doctorId: req.user.id, dayOfWeek, effectiveFrom, effectiveTo, endTime, startTime: normalizedStart,
+    });
+    if (overlaps) {
       await connection.rollback();
       transactionStarted = false;
       return res.status(409).json({ error: 'Availability overlaps an existing slot.' });
     }
 
-    const [result] = await connection.execute(
-      `INSERT INTO availability
-         (doctor_id, day_of_week, start_time, end_time, effective_from, effective_to)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [req.user.id, dayOfWeek, normalizedStart, endTime, effectiveFrom, effectiveTo],
-    );
+    const id = await doctorModel.createAvailability(connection, {
+      doctorId: req.user.id, dayOfWeek, startTime: normalizedStart, endTime, effectiveFrom, effectiveTo,
+    });
     await connection.commit();
     transactionStarted = false;
     return res.status(201).json({
       availability: {
-        id: String(result.insertId),
+        id: String(id),
         doctorId: req.user.id,
         dayOfWeek,
         startTime: normalizedStart,
@@ -135,6 +136,88 @@ async function createAvailability(req, res) {
   }
 }
 
+async function updateAvailability(req, res) {
+  const availabilityId = parsePositiveInteger(req.params.availabilityId);
+  if (availabilityId === null) {
+    return res.status(400).json({ error: 'availabilityId must be a positive integer.' });
+  }
+  const parsed = parseAvailability(req.body);
+  if (!parsed.value) return res.status(400).json({ error: parsed.error });
+  const { dayOfWeek, startTime, endTime, effectiveFrom, effectiveTo } = parsed.value;
+
+  let connection;
+  let transactionStarted = false;
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    transactionStarted = true;
+    const ownedAvailability = await doctorModel.findOwnedAvailabilityForUpdate(
+      connection,
+      availabilityId,
+      req.user.id,
+    );
+    if (!ownedAvailability) {
+      await connection.rollback();
+      transactionStarted = false;
+      return res.status(404).json({ error: 'Availability slot not found.' });
+    }
+    const overlaps = await doctorModel.findOverlappingAvailability(connection, {
+      doctorId: req.user.id,
+      dayOfWeek,
+      effectiveFrom,
+      effectiveTo,
+      endTime,
+      startTime,
+      excludeId: availabilityId,
+    });
+    if (overlaps) {
+      await connection.rollback();
+      transactionStarted = false;
+      return res.status(409).json({ error: 'Availability overlaps an existing slot.' });
+    }
+
+    const affectedRows = await doctorModel.updateAvailability(connection, {
+      id: availabilityId,
+      doctorId: req.user.id,
+      dayOfWeek,
+      startTime,
+      endTime,
+      effectiveFrom,
+      effectiveTo,
+    });
+    if (affectedRows === 0) {
+      const [existing] = await connection.execute(
+        'SELECT id FROM availability WHERE id = ? AND doctor_id = ?',
+        [availabilityId, req.user.id],
+      );
+      if (!existing[0]) {
+        await connection.rollback();
+        transactionStarted = false;
+        return res.status(404).json({ error: 'Availability slot not found.' });
+      }
+    }
+    await connection.commit();
+    transactionStarted = false;
+    return res.status(200).json({
+      availability: {
+        id: String(availabilityId),
+        doctorId: req.user.id,
+        dayOfWeek,
+        startTime,
+        endTime,
+        effectiveFrom,
+        effectiveTo,
+      },
+    });
+  } catch (error) {
+    if (transactionStarted) await connection.rollback();
+    console.error('Availability update failed:', error.message);
+    return res.status(500).json({ error: 'Unable to update availability.' });
+  } finally {
+    if (connection) connection.release();
+  }
+}
+
 async function deleteAvailability(req, res) {
   const availabilityId = parsePositiveInteger(req.params.availabilityId);
   if (availabilityId === null) {
@@ -142,11 +225,8 @@ async function deleteAvailability(req, res) {
   }
 
   try {
-    const [result] = await pool.execute(
-      'DELETE FROM availability WHERE id = ? AND doctor_id = ?',
-      [availabilityId, req.user.id],
-    );
-    if (result.affectedRows === 0) {
+    const affectedRows = await doctorModel.deleteAvailability(availabilityId, req.user.id);
+    if (affectedRows === 0) {
       return res.status(404).json({ error: 'Availability slot not found.' });
     }
     return res.status(204).end();
@@ -165,34 +245,63 @@ async function searchDoctors(req, res) {
     : 0;
   const limit = requestedLimit === null ? 20 : Math.min(requestedLimit, 100);
   const offset = Number.isSafeInteger(requestedOffset) ? requestedOffset : 0;
-  const conditions = ['u.is_active = TRUE'];
-  const values = [];
-
-  if (query) {
-    conditions.push('(d.specialty LIKE ? OR d.license_number LIKE ?)');
-    values.push(`%${query}%`, `%${query}%`);
-  }
-  if (specialty) {
-    conditions.push('d.specialty LIKE ?');
-    values.push(`%${specialty}%`);
+  const date = req.query.date === undefined ? new Date().toISOString().slice(0, 10) : req.query.date;
+  if (!isValidDate(date)) {
+    return res.status(400).json({ error: 'date must be a valid YYYY-MM-DD date.' });
   }
 
   try {
-    const [doctors] = await pool.execute(
-      `SELECT CAST(d.user_id AS CHAR) AS id,
-              d.license_number AS licenseNumber, d.specialty
-       FROM doctors d
-       JOIN users u ON u.id = d.user_id
-       WHERE ${conditions.join(' AND ')}
-       ORDER BY d.specialty, d.license_number
-       LIMIT ? OFFSET ?`,
-      [...values, limit, offset],
-    );
-    return res.status(200).json({ doctors, limit, offset });
+    const doctors = await doctorModel.search({ query, specialty, limit, offset });
+    for (const doctor of doctors) {
+      doctor.slots = await loadFreeSlots(doctor.id, date);
+    }
+    return res.status(200).json({ doctors, limit, offset, date });
   } catch (error) {
     console.error('Doctor search failed:', error.message);
     return res.status(500).json({ error: 'Unable to search doctors.' });
   }
+}
+
+async function getDoctorProfile(req, res) {
+  const doctorId = parsePositiveInteger(req.params.doctorId);
+  if (doctorId === null) {
+    return res.status(400).json({ error: 'doctorId must be a positive integer.' });
+  }
+  try {
+    const doctor = await doctorModel.findProfileById(doctorId);
+    if (!doctor) return res.status(404).json({ error: 'Doctor not found.' });
+    return res.status(200).json({ doctor });
+  } catch (error) {
+    console.error('Doctor profile lookup failed:', error.message);
+    return res.status(500).json({ error: 'Unable to load doctor profile.' });
+  }
+}
+
+async function loadFreeSlots(doctorId, date) {
+  const weekday = new Date(`${date}T00:00:00.000Z`).getUTCDay() || 7;
+  const [availability, appointments] = await Promise.all([
+    doctorModel.findAvailabilityForDate(doctorId, weekday, date),
+    doctorModel.findAppointmentsForDate(doctorId, date),
+  ]);
+  const slots = new Map();
+  for (const window of availability) {
+    const windowStart = timeToMinutes(window.startTime);
+    const windowEnd = timeToMinutes(window.endTime);
+    for (let start = windowStart; start + SLOT_MINUTES <= windowEnd; start += SLOT_MINUTES) {
+      const startsAt = minuteToDateTime(date, start);
+      const endsAt = minuteToDateTime(date, start + SLOT_MINUTES);
+      const hasAppointment = appointments.some((appointment) => (
+        appointment.startsAt < endsAt && appointment.endsAt > startsAt
+      ));
+      if (!hasAppointment) {
+        slots.set(minutesToTime(start), {
+          startTime: minutesToTime(start),
+          endTime: minutesToTime(start + SLOT_MINUTES),
+        });
+      }
+    }
+  }
+  return [...slots.values()];
 }
 
 async function getFreeSlots(req, res) {
@@ -202,62 +311,25 @@ async function getFreeSlots(req, res) {
     return res.status(400).json({ error: 'Provide a valid doctorId and date (YYYY-MM-DD).' });
   }
 
-  const weekday = new Date(`${date}T00:00:00.000Z`).getUTCDay() || 7;
   try {
-    const [doctors] = await pool.execute(
-      `SELECT d.user_id FROM doctors d
-       JOIN users u ON u.id = d.user_id
-       WHERE d.user_id = ? AND u.is_active = TRUE`,
-      [doctorId],
-    );
-    if (!doctors[0]) {
+    const doctor = await doctorModel.findProfileById(doctorId);
+    if (!doctor) {
       return res.status(404).json({ error: 'Doctor not found.' });
     }
 
-    const [availability] = await pool.execute(
-      `SELECT TIME_FORMAT(start_time, '%H:%i:%s') AS startTime,
-              TIME_FORMAT(end_time, '%H:%i:%s') AS endTime
-       FROM availability
-       WHERE doctor_id = ? AND day_of_week = ?
-         AND effective_from <= ?
-         AND (effective_to IS NULL OR effective_to >= ?)
-       ORDER BY start_time`,
-      [doctorId, weekday, date, date],
-    );
-    const [appointments] = await pool.execute(
-      `SELECT DATE_FORMAT(starts_at, '%Y-%m-%d %H:%i:%s') AS startsAt,
-              DATE_FORMAT(ends_at, '%Y-%m-%d %H:%i:%s') AS endsAt
-       FROM appointments
-       WHERE doctor_id = ? AND status = 'Scheduled'
-         AND starts_at < DATE_ADD(?, INTERVAL 1 DAY)
-         AND ends_at > ?`,
-      [doctorId, date, date],
-    );
-
-    const slots = new Map();
-    for (const window of availability) {
-      const windowStart = timeToMinutes(window.startTime);
-      const windowEnd = timeToMinutes(window.endTime);
-      for (let start = windowStart; start + SLOT_MINUTES <= windowEnd; start += SLOT_MINUTES) {
-        const startsAt = minuteToDateTime(date, start);
-        const endsAt = minuteToDateTime(date, start + SLOT_MINUTES);
-        const hasAppointment = appointments.some((appointment) => (
-          appointment.startsAt < endsAt && appointment.endsAt > startsAt
-        ));
-        if (!hasAppointment) {
-          slots.set(minutesToTime(start), {
-            startTime: minutesToTime(start),
-            endTime: minutesToTime(start + SLOT_MINUTES),
-          });
-        }
-      }
-    }
-
-    return res.status(200).json({ doctorId: String(doctorId), date, slots: [...slots.values()] });
+    const slots = await loadFreeSlots(doctorId, date);
+    return res.status(200).json({ doctorId: String(doctorId), date, slots });
   } catch (error) {
     console.error('Free slot lookup failed:', error.message);
     return res.status(500).json({ error: 'Unable to load free slots.' });
   }
 }
 
-module.exports = { createAvailability, deleteAvailability, searchDoctors, getFreeSlots };
+module.exports = {
+  createAvailability,
+  deleteAvailability,
+  getDoctorProfile,
+  getFreeSlots,
+  searchDoctors,
+  updateAvailability,
+};
