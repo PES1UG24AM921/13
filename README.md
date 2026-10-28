@@ -113,6 +113,12 @@ All doctor profile, doctor listing, and slot lookup endpoints require a bearer t
 
 Availability creation and updates are restricted to doctor accounts. The body requires `dayOfWeek` (1-7) and `startTime` on a half-hour boundary; each block represents one 30-minute appointment. `effectiveFrom` defaults to today and `effectiveTo` may be omitted or `null`. Invalid dates, times, and overlapping blocks are rejected.
 
+## Appointment booking API
+
+- `POST /api/appointments` is restricted to authenticated patients. Submit `doctorId`, a future `startsAt` (`YYYY-MM-DD HH:mm`, on the hour or half-hour), and optional `reason`.
+- A booking is confirmed only when the active doctor and patient exist, the requested slot falls within the doctor's effective availability, and neither party has a conflicting scheduled appointment. Success returns `201` with the persisted appointment and `Scheduled` status; invalid requests return `400`, and unavailable or conflicting slots return `409`.
+- Booking checks and insertion run in a database transaction. The doctor row is locked to serialize bookings for that doctor, conflicting appointments are checked before insertion, and database unique constraints provide a final guard against duplicate active start times.
+
 ## Security
 
 The system will implement appropriate authentication and authorization mechanisms to protect patient and healthcare information.
