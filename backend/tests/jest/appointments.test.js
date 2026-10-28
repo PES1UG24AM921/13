@@ -39,6 +39,24 @@ describe('Appointment management', () => {
     expect(conn.rollback).toHaveBeenCalled();
   });
 
+  test('booking an overlapping scheduled appointment returns 409 without inserting', async () => {
+    const conn = db.setup([
+      asUser('patient'),
+      ['SELECT d.user_id FROM doctors', [{ user_id: 9 }]],
+      ['SELECT p.user_id FROM patients', [{ user_id: 5 }]],
+      ['SELECT id FROM availability', [{ id: 1 }]],
+      ['SELECT id FROM appointments', [{ id: 2 }]],
+    ]);
+    const res = await book({ doctorId: 9, startsAt: '2030-01-07 09:00' });
+    expect(res.status).toBe(409);
+    expect(conn.execute.mock.calls.some(([sql]) => sql.includes('INSERT INTO appointments'))).toBe(false);
+    const [conflictSql, conflictParams] = conn.execute.mock.calls.find(([sql]) => (
+      sql.includes("WHERE status = 'Scheduled'")
+    ));
+    expect(conflictSql).toContain('starts_at < ? AND ends_at > ?');
+    expect(conflictParams).toEqual(expect.arrayContaining(['2030-01-07 09:30:00', '2030-01-07 09:00:00']));
+  });
+
   test('TC-Apt-02b slot outside the doctor availability returns 409', async () => {
     db.setup([
       asUser('patient'),
@@ -50,11 +68,11 @@ describe('Appointment management', () => {
     expect(res.status).toBe(409);
   });
 
-  // KNOWN DEFECT: the API has no check for dates in the past.
-  test.failing('TC-Apt-04 booking a slot in the past returns 400', async () => {
-    db.setup(bookingRules());
+  test('TC-Apt-04 booking a slot in the past returns 400 without inserting', async () => {
+    const conn = db.setup(bookingRules());
     const res = await book({ doctorId: 9, startsAt: '2020-01-06 09:00' });
     expect(res.status).toBe(400);
+    expect(conn.execute).not.toHaveBeenCalled();
   });
 
   test('TC-Apt-04b malformed or non half-hour time returns 400', async () => {
@@ -75,6 +93,68 @@ describe('Appointment management', () => {
     db.setup(bookingRules());
     const res = await book({ doctorId: 9, startsAt: '2030-01-07 09:00', patientId: 6 });
     expect(res.status).toBe(403);
+  });
+
+  test('simultaneous booking requests for the same doctor slot allow only one confirmation', async () => {
+    db.setup([asUser('patient')]);
+    let doctorLockHeld = false;
+    const lockWaiters = [];
+    let booked = false;
+    let nextAppointmentId = 20;
+    const acquireDoctorLock = async () => {
+      if (!doctorLockHeld) {
+        doctorLockHeld = true;
+        return;
+      }
+      await new Promise((resolve) => lockWaiters.push(resolve));
+    };
+    const releaseDoctorLock = () => {
+      const next = lockWaiters.shift();
+      if (next) next();
+      else doctorLockHeld = false;
+    };
+    const makeConnection = () => {
+      const connection = {
+        beginTransaction: jest.fn().mockResolvedValue(),
+        commit: jest.fn().mockImplementation(async () => releaseDoctorLock()),
+        rollback: jest.fn().mockImplementation(async () => releaseDoctorLock()),
+        release: jest.fn(),
+      };
+      connection.execute = jest.fn(async (sql) => {
+        if (sql.includes('SELECT d.user_id FROM doctors')) {
+          await acquireDoctorLock();
+          return [[{ user_id: 9 }]];
+        }
+        if (sql.includes('SELECT p.user_id FROM patients')) return [[{ user_id: 5 }]];
+        if (sql.includes('SELECT id FROM availability')) return [[{ id: 1 }]];
+        if (sql.includes("WHERE status = 'Scheduled'")) return [booked ? [{ id: 20 }] : []];
+        if (sql.includes('INSERT INTO appointments')) {
+          booked = true;
+          nextAppointmentId += 1;
+          return [{ insertId: nextAppointmentId }];
+        }
+        return [[]];
+      });
+      return connection;
+    };
+    const connections = [];
+    db.getConnection.mockImplementation(async () => {
+      const connection = makeConnection();
+      connections.push(connection);
+      return connection;
+    });
+
+    const first = request(app).post('/api/appointments')
+      .set('Authorization', bearer('patient', '5'))
+      .send({ doctorId: 9, startsAt: '2030-01-07 09:00' });
+    const second = request(app).post('/api/appointments')
+      .set('Authorization', bearer('patient', '6'))
+      .send({ doctorId: 9, startsAt: '2030-01-07 09:00' });
+    const responses = await Promise.all([first, second]);
+
+    expect(responses.map(({ status }) => status).sort()).toEqual([201, 409]);
+    expect(connections.filter(({ commit }) => commit.mock.calls.length).length).toBe(1);
+    expect(connections.filter(({ rollback }) => rollback.mock.calls.length).length).toBe(1);
   });
 
   test('TC-Apt-06 patient list is filtered to own appointments', async () => {
