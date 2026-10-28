@@ -34,6 +34,7 @@ describe('Security and input validation', () => {
       ['post', '/api/records', ['patient', 'admin']],
       ['post', '/api/appointments', ['doctor', 'admin']],
       ['post', '/api/doctors/availability', ['patient', 'admin']],
+      ['put', '/api/doctors/availability/1', ['patient', 'admin']],
       ['get', '/api/admin/overview', ['patient', 'doctor']],
     ];
     for (const [method, url, deniedRoles] of matrix) {
@@ -53,10 +54,11 @@ describe('Security and input validation', () => {
   });
 
   test('TC-Sec-05b SQL injection in doctor search is sent only as a bound parameter', async () => {
-    db.setup([['FROM doctors d', []]]);
+    db.setup([asUser('patient'), ['FROM doctors d', []]]);
     const payload = "' OR '1'='1";
-    await request(app).get('/api/doctors').query({ q: payload, specialty: payload });
-    const [sql, params] = db.execute.mock.calls[0];
+    await request(app).get('/api/doctors').set('Authorization', bearer('patient', '5'))
+      .query({ q: payload, specialty: payload });
+    const [sql, params] = db.execute.mock.calls.find(([statement]) => statement.includes('FROM doctors d'));
     expect(sql).not.toContain(payload);
     expect(params).toContain(`%${payload}%`);
   });
@@ -87,8 +89,11 @@ describe('Security and input validation', () => {
 
   test('TC-Sec-09 validation and server errors do not leak stack traces or SQL', async () => {
     const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
-    db.setup([['FROM doctors d', new Error("ER_BAD_FIELD_ERROR: Unknown column 'x' in 'field list'")]]);
-    const serverError = await request(app).get('/api/doctors');
+    db.setup([
+      asUser('patient'),
+      ['FROM doctors d', new Error("ER_BAD_FIELD_ERROR: Unknown column 'x' in 'field list'")],
+    ]);
+    const serverError = await request(app).get('/api/doctors').set('Authorization', bearer('patient', '5'));
     const validationError = await request(app).post('/api/auth/register').send({ email: 'bad' });
     for (const res of [serverError, validationError]) {
       expect(JSON.stringify(res.body)).not.toMatch(/stack|ER_BAD_FIELD|Unknown column|node_modules|at .*\.js/);
@@ -116,8 +121,11 @@ describe('Security and input validation', () => {
 
   test('TC-Rel-01b database down returns 500 with a clear message', async () => {
     const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
-    db.setup([['FROM doctors d', Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' })]]);
-    const res = await request(app).get('/api/doctors');
+    db.setup([
+      asUser('patient'),
+      ['FROM doctors d', Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' })],
+    ]);
+    const res = await request(app).get('/api/doctors').set('Authorization', bearer('patient', '5'));
     spy.mockRestore();
     expect(res.status).toBe(500);
     expect(res.body.error).toBe('Unable to search doctors.');
