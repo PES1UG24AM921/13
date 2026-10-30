@@ -119,6 +119,13 @@ Availability creation and updates are restricted to doctor accounts. The body re
 - A booking is confirmed only when the active doctor and patient exist, the requested slot falls within the doctor's effective availability, and neither party has a conflicting scheduled appointment. Success returns `201` with the persisted appointment and `Scheduled` status; invalid requests return `400`, and unavailable or conflicting slots return `409`.
 - Booking checks and insertion run in a database transaction. The doctor row is locked to serialize bookings for that doctor, conflicting appointments are checked before insertion, and database unique constraints provide a final guard against duplicate active start times.
 
+## Medical records API
+
+- `POST /api/records` lets an authenticated doctor create a record for an appointment belonging to that doctor. `appointmentId` and a non-empty `diagnosis` are required; `treatment` and `notes` are optional.
+- `GET /api/records` and `GET /api/records/:recordId` let patients view only their own records. Doctors can view records only for patients with whom they have an appointment.
+- `PUT /api/records/:recordId` lets a doctor update a record only when they have an appointment with that record's patient. Patients cannot create, update, or delete records. Deletion is not supported.
+- Invalid input returns `400`, missing authentication returns `401`, and authenticated users without the required role or patient access receive `403`.
+
 ## Security
 
 The system will implement appropriate authentication and authorization mechanisms to protect patient and healthcare information.
