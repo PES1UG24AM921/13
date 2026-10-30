@@ -1,4 +1,4 @@
-const pool = require('../db');
+const medicalRecordModel = require('../models/medicalRecordModel');
 
 const MAX_TEXT_BYTES = 65000;
 
@@ -19,6 +19,10 @@ function isValidText(value, required = false) {
     && Buffer.byteLength(value, 'utf8') <= MAX_TEXT_BYTES;
 }
 
+function logDatabaseError(action, error) {
+  console.error(`Medical record ${action} failed:`, error.message);
+}
+
 async function createMedicalRecord(req, res) {
   const appointmentId = parsePositiveId(String(req.body?.appointmentId ?? ''));
   const { diagnosis, treatment = null, notes = null } = req.body || {};
@@ -32,38 +36,35 @@ async function createMedicalRecord(req, res) {
   }
 
   try {
-    const [appointments] = await pool.execute(
-      `SELECT CAST(id AS CHAR) AS id, CAST(patient_id AS CHAR) AS patientId
-       FROM appointments
-       WHERE id = ? AND doctor_id = ?`,
-      [appointmentId, req.user.id],
-    );
-    if (!appointments[0]) {
-      return res.status(404).json({ error: 'Appointment not found for this doctor.' });
+    const appointment = await medicalRecordModel.findAppointmentForDoctor(appointmentId, req.user.id);
+    if (!appointment) {
+      return res.status(403).json({ error: 'You are not authorized to create a record for this appointment.' });
     }
 
-    const [result] = await pool.execute(
-      `INSERT INTO medical_records
-         (appointment_id, patient_id, doctor_id, diagnosis, treatment, notes)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [appointmentId, appointments[0].patientId, req.user.id, diagnosis.trim(), treatment, notes],
-    );
+    const id = await medicalRecordModel.create({
+      appointmentId,
+      patientId: appointment.patientId,
+      doctorId: req.user.id,
+      diagnosis: diagnosis.trim(),
+      treatment: typeof treatment === 'string' ? treatment.trim() : treatment,
+      notes: typeof notes === 'string' ? notes.trim() : notes,
+    });
     return res.status(201).json({
       medicalRecord: {
-        id: String(result.insertId),
+        id: String(id),
         appointmentId,
-        patientId: appointments[0].patientId,
+        patientId: appointment.patientId,
         doctorId: String(req.user.id),
         diagnosis: diagnosis.trim(),
-        treatment,
-        notes,
+        treatment: typeof treatment === 'string' ? treatment.trim() : treatment,
+        notes: typeof notes === 'string' ? notes.trim() : notes,
       },
     });
   } catch (error) {
     if (error.code === 'ER_DUP_ENTRY') {
       return res.status(409).json({ error: 'A medical record already exists for this appointment.' });
     }
-    console.error('Medical record creation failed:', error.message);
+    logDatabaseError('creation', error);
     return res.status(500).json({ error: 'Unable to create medical record.' });
   }
 }
@@ -81,79 +82,105 @@ async function updateMedicalRecord(req, res) {
   }
 
   try {
-    const [result] = await pool.execute(
-      `UPDATE medical_records
-       SET diagnosis = ?, treatment = ?, notes = ?
-       WHERE id = ? AND doctor_id = ?`,
-      [diagnosis.trim(), treatment, notes, recordId, req.user.id],
-    );
-    if (result.affectedRows === 0) {
-      const [records] = await pool.execute(
-        'SELECT id FROM medical_records WHERE id = ? AND doctor_id = ?',
-        [recordId, req.user.id],
-      );
-      if (!records[0]) {
-        return res.status(404).json({ error: 'Medical record not found.' });
-      }
+    const patientId = await medicalRecordModel.findPatientId(recordId);
+    if (!patientId) {
+      return res.status(404).json({ error: 'Medical record not found.' });
+    }
+    if (!(await medicalRecordModel.hasTreatingRelationship(patientId, req.user.id))) {
+      return res.status(403).json({ error: 'You are not authorized to update this patient\'s records.' });
     }
 
-    const [records] = await pool.execute(
-      `SELECT CAST(id AS CHAR) AS id,
-              CAST(appointment_id AS CHAR) AS appointmentId,
-              CAST(patient_id AS CHAR) AS patientId,
-              CAST(doctor_id AS CHAR) AS doctorId,
-              diagnosis, treatment, notes,
-              DATE_FORMAT(recorded_at, '%Y-%m-%d %H:%i:%s') AS recordedAt
-       FROM medical_records WHERE id = ? AND doctor_id = ?`,
-      [recordId, req.user.id],
-    );
-    return res.status(200).json({ medicalRecord: records[0] });
+    await medicalRecordModel.update(recordId, patientId, {
+      diagnosis: diagnosis.trim(),
+      treatment: typeof treatment === 'string' ? treatment.trim() : treatment,
+      notes: typeof notes === 'string' ? notes.trim() : notes,
+    });
+    const record = await medicalRecordModel.findById(recordId);
+    if (!record) {
+      return res.status(404).json({ error: 'Medical record not found.' });
+    }
+    return res.status(200).json({ medicalRecord: record });
   } catch (error) {
-    console.error('Medical record update failed:', error.message);
+    logDatabaseError('update', error);
     return res.status(500).json({ error: 'Unable to update medical record.' });
   }
 }
 
+async function getMedicalRecord(req, res) {
+  const recordId = parsePositiveId(req.params.recordId);
+  if (!recordId) {
+    return res.status(400).json({ error: 'recordId must be a positive integer.' });
+  }
+
+  try {
+    const patientId = await medicalRecordModel.findPatientId(recordId);
+    if (!patientId) {
+      return res.status(404).json({ error: 'Medical record not found.' });
+    }
+    if (req.user.role === 'patient' && patientId !== String(req.user.id)) {
+      return res.status(403).json({ error: 'You may only view your own medical records.' });
+    }
+    if (
+      req.user.role === 'doctor'
+      && !(await medicalRecordModel.hasTreatingRelationship(patientId, req.user.id))
+    ) {
+      return res.status(403).json({ error: 'You are not authorized to view this patient\'s records.' });
+    }
+
+    const record = await medicalRecordModel.findById(recordId);
+    if (!record) {
+      return res.status(404).json({ error: 'Medical record not found.' });
+    }
+    return res.status(200).json({ medicalRecord: record });
+  } catch (error) {
+    logDatabaseError('lookup', error);
+    return res.status(500).json({ error: 'Unable to load medical record.' });
+  }
+}
+
 async function getMedicalRecords(req, res) {
-  const conditions = [];
-  const values = [];
+  let patientId;
   if (req.user.role === 'patient') {
-    conditions.push('mr.patient_id = ?');
-    values.push(req.user.id);
+    if (
+      req.query.patientId !== undefined
+      && String(req.query.patientId) !== String(req.user.id)
+    ) {
+      return res.status(403).json({ error: 'You may only view your own medical records.' });
+    }
+    patientId = String(req.user.id);
   } else if (req.user.role === 'doctor') {
-    conditions.push('mr.doctor_id = ?');
-    values.push(req.user.id);
     if (req.query.patientId !== undefined) {
-      const patientId = String(req.query.patientId);
-      if (!/^\d+$/.test(patientId) || Number(patientId) < 1) {
+      patientId = parsePositiveId(String(req.query.patientId));
+      if (!patientId) {
         return res.status(400).json({ error: 'patientId must be a positive integer.' });
       }
-      conditions.push('mr.patient_id = ?');
-      values.push(patientId);
     }
   } else {
     return res.status(403).json({ error: 'Forbidden.' });
   }
 
   try {
-    const [records] = await pool.execute(
-      `SELECT CAST(mr.id AS CHAR) AS id,
-              CAST(mr.appointment_id AS CHAR) AS appointmentId,
-              CAST(mr.doctor_id AS CHAR) AS doctorId,
-              d.specialty AS doctorSpecialty,
-              mr.diagnosis, mr.treatment, mr.notes,
-              DATE_FORMAT(mr.recorded_at, '%Y-%m-%d %H:%i:%s') AS recordedAt
-       FROM medical_records mr
-       JOIN doctors d ON d.user_id = mr.doctor_id
-      WHERE ${conditions.join(' AND ')}
-       ORDER BY mr.recorded_at DESC, mr.id DESC`,
-          values,
-    );
+    if (
+      req.user.role === 'doctor'
+      && patientId
+      && !(await medicalRecordModel.hasTreatingRelationship(patientId, req.user.id))
+    ) {
+      return res.status(403).json({ error: 'You are not authorized to view this patient\'s records.' });
+    }
+
+    const records = req.user.role === 'patient'
+      ? await medicalRecordModel.listForPatient(patientId)
+      : await medicalRecordModel.listForDoctor(req.user.id, patientId);
     return res.status(200).json({ medicalRecords: records });
   } catch (error) {
-    console.error('Medical record lookup failed:', error.message);
+    logDatabaseError('lookup', error);
     return res.status(500).json({ error: 'Unable to load medical records.' });
   }
 }
 
-module.exports = { createMedicalRecord, updateMedicalRecord, getMedicalRecords };
+module.exports = {
+  createMedicalRecord,
+  getMedicalRecord,
+  getMedicalRecords,
+  updateMedicalRecord,
+};
