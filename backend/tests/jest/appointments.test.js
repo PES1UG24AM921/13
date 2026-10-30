@@ -174,7 +174,7 @@ describe('Appointment management', () => {
   });
 
   test('TC-Apt-08 reschedule to a free slot returns 200', async () => {
-    db.setup([
+    const conn = db.setup([
       asUser('patient'),
       ['SELECT id, doctor_id AS doctorId, status', [{ id: 11, doctorId: 9, status: 'Scheduled' }]],
       ['SELECT d.user_id FROM doctors', [{ user_id: 9 }]],
@@ -187,6 +187,8 @@ describe('Appointment management', () => {
       .set('Authorization', bearer('patient', '5')).send({ startsAt: '2030-01-07 10:00' });
     expect(res.status).toBe(200);
     expect(res.body.appointment.startsAt).toBe('2030-01-07 10:00:00');
+    expect(conn.commit).toHaveBeenCalled();
+    expect(conn.rollback).not.toHaveBeenCalled();
   });
 
   test('TC-Apt-09 reschedule to a taken slot returns 409 and does not update', async () => {
@@ -205,7 +207,7 @@ describe('Appointment management', () => {
   });
 
   test('TC-Apt-10 cancel sets status Cancelled', async () => {
-    db.setup([
+    const conn = db.setup([
       asUser('patient'),
       ['SELECT status FROM appointments', [{ status: 'Scheduled' }]],
       ["UPDATE appointments SET status = 'Cancelled'", { affectedRows: 1 }],
@@ -213,6 +215,8 @@ describe('Appointment management', () => {
     const res = await request(app).patch('/api/appointments/11/cancel').set('Authorization', bearer('patient', '5'));
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('Cancelled');
+    expect(conn.commit).toHaveBeenCalled();
+    expect(conn.rollback).not.toHaveBeenCalled();
   });
 
   test('TC-Apt-10b cancelling an already cancelled appointment returns 409', async () => {
@@ -247,5 +251,53 @@ describe('Appointment management', () => {
     expect(conn.rollback).toHaveBeenCalled();
     expect(conn.commit).not.toHaveBeenCalled();
     expect(conn.release).toHaveBeenCalled();
+  });
+
+  test('TC-DB-04 failed reschedule rolls back without committing', async () => {
+    const conn = db.setup([
+      asUser('patient'),
+      ['SELECT id, doctor_id AS doctorId, status', [{ id: 11, doctorId: 9, status: 'Scheduled' }]],
+      ['SELECT d.user_id FROM doctors', [{ user_id: 9 }]],
+      ['SELECT p.user_id FROM patients', [{ user_id: 5 }]],
+      ['SELECT id FROM availability', [{ id: 1 }]],
+      ['SELECT id FROM appointments', []],
+      ['UPDATE appointments SET starts_at', new Error('disk failure')],
+    ]);
+    const res = await request(app).put('/api/appointments/11/reschedule')
+      .set('Authorization', bearer('patient', '5')).send({ startsAt: '2030-01-07 10:00' });
+    expect(res.status).toBe(500);
+    expect(conn.rollback).toHaveBeenCalled();
+    expect(conn.commit).not.toHaveBeenCalled();
+    expect(conn.release).toHaveBeenCalled();
+  });
+
+  test('TC-DB-05 failed cancellation rolls back without committing', async () => {
+    const conn = db.setup([
+      asUser('patient'),
+      ['SELECT status FROM appointments', [{ status: 'Scheduled' }]],
+      ["UPDATE appointments SET status = 'Cancelled'", new Error('disk failure')],
+    ]);
+    const res = await request(app).patch('/api/appointments/11/cancel')
+      .set('Authorization', bearer('patient', '5'));
+    expect(res.status).toBe(500);
+    expect(conn.rollback).toHaveBeenCalled();
+    expect(conn.commit).not.toHaveBeenCalled();
+    expect(conn.release).toHaveBeenCalled();
+  });
+
+  test('TC-DB-06 a connection with a failed rollback is destroyed, not pooled', async () => {
+    const conn = db.setup([
+      asUser('patient'),
+      ['SELECT d.user_id FROM doctors', [{ user_id: 9 }]],
+      ['SELECT p.user_id FROM patients', [{ user_id: 5 }]],
+      ['SELECT id FROM availability', [{ id: 1 }]],
+      ['SELECT id FROM appointments', []],
+      ['INSERT INTO appointments', new Error('write failure')],
+    ]);
+    conn.rollback.mockRejectedValue(new Error('connection lost'));
+    const res = await book({ doctorId: 9, startsAt: '2030-01-07 09:00' });
+    expect(res.status).toBe(500);
+    expect(conn.destroy).toHaveBeenCalled();
+    expect(conn.release).not.toHaveBeenCalled();
   });
 });
