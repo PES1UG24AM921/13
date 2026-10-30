@@ -126,6 +126,24 @@ Availability creation and updates are restricted to doctor accounts. The body re
 - `PUT /api/records/:recordId` lets a doctor update a record only when they have an appointment with that record's patient. Patients cannot create, update, or delete records. Deletion is not supported.
 - Invalid input returns `400`, missing authentication returns `401`, and authenticated users without the required role or patient access receive `403`.
 
+## Database integrity, transactions, and backups
+
+- `database/schema.sql` enforces user-role ownership for patient and doctor profiles, patient/doctor references for appointments, and a composite appointment/patient/doctor reference for medical records. Appointment and medical-record foreign keys restrict deletion when dependent records exist.
+- Scheduled appointments are constrained to exactly 30 minutes and start only on `:00` or `:30` with zero seconds. The unique key on `(doctor_id, active_doctor_start)` therefore prevents overlapping active doctor slots; cancelled appointments do not occupy that key. The patient active-slot key prevents patient double-booking.
+- Appointment booking, rescheduling, and cancellation run within InnoDB transactions. The appointment row is locked during reschedule/cancel; booking and reschedule also lock the doctor and check conflicts before modifying data. Failure paths roll back, and tests assert rollback/no-commit behavior.
+- The database helper scripts are intentionally restricted to the exact database name `hms_test`. Set `DB_NAME=hms_test` in the environment (the other `DB_*` values can come from `backend/.env`) before running them. `npm run db:test:init` initializes that database from the shared schema without changing `schema.sql`; `npm run db:test:backup` writes a timestamped SQL dump under `database/backups`; `npm run db:test:restore -- <backup.sql>` restores it. Restore replays the dump's `DROP TABLE`/create/data statements, so it replaces the contents of `hms_test`. Keep credentials and test data isolated from production.
+- Default automated tests assert schema constraints, backup/restore database scoping and dump-stream behavior, and transaction rollback behavior. For real MySQL constraint and restore verification, initialize an isolated test database and enable the integration tests:
+
+  ```powershell
+  $env:DB_NAME = 'hms_test'
+  cd backend
+  npm run db:test:init
+  $env:HMS_RUN_DB_INTEGRATION = 'true'
+  npm test -- --runTestsByPath tests/jest/databaseIntegrity.test.js
+  ```
+
+  The opt-in suite checks that MySQL rejects orphan references and duplicate active doctor slots, then verifies a backup/restore round-trip recovers the saved test-table value. MySQL client utilities `mysql` and `mysqldump` must be installed and available on `PATH`.
+
 ## Security
 
 The system will implement appropriate authentication and authorization mechanisms to protect patient and healthcare information.

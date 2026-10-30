@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS appointments (
     reason VARCHAR(1000) NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    -- Half-hour alignment plus the 30-minute check makes this unique key an overlap guard.
     active_doctor_start DATETIME GENERATED ALWAYS AS (
         CASE WHEN status = 'Scheduled' THEN starts_at ELSE NULL END
     ) STORED,

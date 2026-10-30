@@ -11,6 +11,7 @@ dist/
 
 # Logs
 *.log
+database/backups/*.sql
 
 # macOS
 .DS_Store

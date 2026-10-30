@@ -12,6 +12,7 @@ function makeConnection(rules) {
     commit: jest.fn().mockResolvedValue(),
     rollback: jest.fn().mockResolvedValue(),
     release: jest.fn(),
+    destroy: jest.fn(),
   };
   return connection;
 }

@@ -7,7 +7,10 @@
     "start": "node server.js",
     "seed": "node seed.js",
     "test": "jest --runInBand --passWithNoTests",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "db:test:init": "node ../database/scripts/create-test-db.js",
+    "db:test:backup": "node ../database/scripts/backup-test-db.js",
+    "db:test:restore": "node ../database/scripts/restore-test-db.js"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",
