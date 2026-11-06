@@ -127,6 +127,8 @@ Availability creation and updates are restricted to doctor accounts. The body re
 - `PUT /api/records/:recordId` lets a doctor update a record only when they have an appointment with that record's patient. Patients cannot create, update, or delete records. Deletion is not supported.
 - Invalid input returns `400`, missing authentication returns `401`, and authenticated users without the required role or patient access receive `403`.
 
+The API rejects JSON request bodies larger than 16 KB with `413 Payload Too Large` and a clear error response.
+
 ## Patient profile API
 
 - `GET /api/patients/me` and `PUT /api/patients/me` are restricted to the authenticated patient. Profile updates accept valid `YYYY-MM-DD` dates of birth no later than today and phone numbers containing 7-15 digits with optional standard separators.

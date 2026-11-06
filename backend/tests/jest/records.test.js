@@ -81,10 +81,12 @@ describe('Medical records', () => {
     expect(res.body.medicalRecord.diagnosis).toBe('Cold');
   });
 
-  test('TC-Rec-04 doctor without a treating relationship receives 403', async () => {
+  test('TC-Rec-04 doctor without a treating relationship receives 403, not an empty 200', async () => {
     db.setup([asUser('doctor'), ['FROM appointments', []]]);
     const res = await request(app).get('/api/records?patientId=77').set('Authorization', bearer('doctor', '9'));
     expect(res.status).toBe(403);
+    expect(res.body.medicalRecords).toBeUndefined();
+    expect(db.execute.mock.calls.some(([sql]) => sql.includes('FROM medical_records mr'))).toBe(false);
   });
 
   test('TC-Rec-04b doctor without a treating relationship cannot update a patient record', async () => {
