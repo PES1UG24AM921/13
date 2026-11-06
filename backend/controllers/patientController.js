@@ -1,4 +1,5 @@
 const pool = require('../db');
+const medicalRecordModel = require('../models/medicalRecordModel');
 
 const PROFILE_FIELDS = Object.freeze({
   firstName: { column: 'first_name', maxLength: 100, required: true },
@@ -17,6 +18,18 @@ function isValidDate(value) {
   return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
 
+function isValidPhone(value) {
+  if (
+    typeof value !== 'string'
+    || value.length > 32
+    || !/^\+?[0-9][0-9\s().-]*$/.test(value)
+  ) {
+    return false;
+  }
+  const digitCount = value.replace(/\D/g, '').length;
+  return digitCount >= 7 && digitCount <= 15;
+}
+
 function requestedAnotherPatient(req) {
   if (
     req.params.patientId !== undefined
@@ -31,18 +44,26 @@ function requestedAnotherPatient(req) {
 }
 
 async function getProfile(req, res) {
-  if (requestedAnotherPatient(req)) {
+  const patientId = req.params.patientId ?? req.user.id;
+  if (req.user.role === 'patient' && String(patientId) !== String(req.user.id)) {
     return res.status(403).json({ error: 'You may only access your own patient profile.' });
   }
 
   try {
+    if (
+      req.user.role === 'doctor'
+      && !(await medicalRecordModel.hasTreatingRelationship(patientId, req.user.id))
+    ) {
+      return res.status(403).json({ error: 'You may only access profiles of your patients.' });
+    }
+
     const [patients] = await pool.execute(
       `SELECT CAST(user_id AS CHAR) AS id, first_name AS firstName,
               last_name AS lastName,
               DATE_FORMAT(date_of_birth, '%Y-%m-%d') AS dateOfBirth,
               phone, address
        FROM patients WHERE user_id = ?`,
-      [req.user.id],
+      [patientId],
     );
     if (!patients[0]) {
       return res.status(404).json({ error: 'Patient profile not found.' });
@@ -71,15 +92,21 @@ async function updateProfile(req, res) {
     const definition = PROFILE_FIELDS[field];
     const value = body[field];
     if (definition.type === 'date') {
-      if (value !== null && !isValidDate(value)) {
-        return res.status(400).json({ error: 'dateOfBirth must be a valid YYYY-MM-DD date or null.' });
+      if (
+        value !== null
+        && (!isValidDate(value) || value > new Date().toISOString().slice(0, 10))
+      ) {
+        return res.status(400).json({ error: 'dateOfBirth must be a valid date no later than today, or null.' });
       }
     } else if (value === null && !definition.required) {
       // Nullable profile fields can be cleared explicitly.
     } else if (
-      typeof value !== 'string'
-      || (definition.required && value.trim().length === 0)
-      || value.trim().length > definition.maxLength
+      (field === 'phone' && !isValidPhone(value))
+      || (field !== 'phone' && (
+        typeof value !== 'string'
+        || (definition.required && value.trim().length === 0)
+        || value.trim().length > definition.maxLength
+      ))
     ) {
       return res.status(400).json({ error: `${field} has an invalid value.` });
     }

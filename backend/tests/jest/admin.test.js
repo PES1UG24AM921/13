@@ -25,13 +25,19 @@ describe('Administration', () => {
     expect(params).toEqual([5, 10]);
   });
 
-  // KNOWN DEFECT: there is no role filter on GET /api/admin/users (SRS HMS-F-051).
-  test.failing('TC-Adm-03b admin lists users filtered by role', async () => {
+  test('TC-Adm-03b admin lists users filtered by role', async () => {
     db.setup([asUser('admin'), ['FROM users u', []], auditRule]);
     await request(app).get('/api/admin/users?role=doctor').set('Authorization', adminAuth());
     const [sql, params] = db.execute.mock.calls.find(([s]) => s.includes('FROM users u'));
     expect(sql).toMatch(/WHERE/i);
     expect(params).toContain('doctor');
+  });
+
+  test('admin user role filter rejects unsupported values', async () => {
+    db.setup([asUser('admin'), auditRule]);
+    const res = await request(app).get('/api/admin/users?role=superuser').set('Authorization', adminAuth());
+    expect(res.status).toBe(400);
+    expect(db.execute.mock.calls.some(([sql]) => sql.includes('FROM users u'))).toBe(false);
   });
 
   test('TC-Adm-04 no password or hash in the users list query or response', async () => {
@@ -78,12 +84,24 @@ describe('Administration', () => {
     expect(res.status).toBe(409);
   });
 
-  // KNOWN DEFECT: GET /api/admin/appointments has no doctor/patient/date/status filters (SRS HMS-F-054).
-  test.failing('TC-Adm-08 admin lists appointments filtered by doctor, patient, date and status', async () => {
+  test('TC-Adm-08 admin lists appointments filtered by doctor, patient, date and status', async () => {
     db.setup([asUser('admin'), ['FROM appointments a', []], auditRule]);
-    await request(app).get('/api/admin/appointments?status=Cancelled&doctorId=9').set('Authorization', adminAuth());
+    await request(app).get('/api/admin/appointments?status=Cancelled&doctorId=9&patientId=5&date=2030-01-07')
+      .set('Authorization', adminAuth());
     const [sql, params] = db.execute.mock.calls.find(([s]) => s.includes('FROM appointments a'));
-    expect(`${sql} ${JSON.stringify(params)}`).toMatch(/a\.status\s*=|Cancelled/);
+    expect(sql).toContain('a.doctor_id = ?');
+    expect(sql).toContain('a.patient_id = ?');
+    expect(sql).toContain('a.status = ?');
+    expect(sql).toContain('a.starts_at >= ?');
+    expect(params).toEqual([9, 5, '2030-01-07', '2030-01-07', 'Cancelled', 50, 0]);
+  });
+
+  test('admin appointment filters reject invalid values', async () => {
+    db.setup([asUser('admin'), auditRule]);
+    const res = await request(app).get('/api/admin/appointments?status=Unknown&doctorId=0')
+      .set('Authorization', adminAuth());
+    expect(res.status).toBe(400);
+    expect(db.execute.mock.calls.some(([sql]) => sql.includes('FROM appointments a'))).toBe(false);
   });
 
   test('TC-Adm-09 admin cancels an appointment', async () => {

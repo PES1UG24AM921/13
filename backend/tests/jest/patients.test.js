@@ -41,20 +41,27 @@ describe('Patient management', () => {
     expect(res.status).toBe(400);
   });
 
-  // KNOWN DEFECT: phone format is not validated (only length) -> letters accepted.
-  test.failing('TC-Pat-04b invalid phone number returns 400', async () => {
+  test('TC-Pat-04b invalid phone number returns 400', async () => {
     db.setup([asUser('patient'), ['UPDATE patients', { affectedRows: 1 }], ['FROM patients WHERE user_id', [profile]]]);
     const res = await request(app).put('/api/patients/me').set('Authorization', bearer('patient', '5'))
       .send({ phone: 'abc-not-a-phone' });
     expect(res.status).toBe(400);
+    expect(db.execute.mock.calls.some(([sql]) => sql.startsWith('UPDATE patients'))).toBe(false);
   });
 
-  // KNOWN DEFECT: a future date of birth is accepted.
-  test.failing('TC-Pat-04c future date of birth returns 400', async () => {
+  test('TC-Pat-04c future date of birth returns 400', async () => {
     db.setup([asUser('patient'), ['UPDATE patients', { affectedRows: 1 }], ['FROM patients WHERE user_id', [profile]]]);
     const res = await request(app).put('/api/patients/me').set('Authorization', bearer('patient', '5'))
       .send({ dateOfBirth: '2999-01-01' });
     expect(res.status).toBe(400);
+    expect(db.execute.mock.calls.some(([sql]) => sql.startsWith('UPDATE patients'))).toBe(false);
+  });
+
+  test('patient can update a valid formatted phone number', async () => {
+    db.setup([asUser('patient'), ['UPDATE patients', { affectedRows: 1 }], ['FROM patients WHERE user_id', [profile]]]);
+    const res = await request(app).put('/api/patients/me').set('Authorization', bearer('patient', '5'))
+      .send({ phone: '+1 (415) 555-0132' });
+    expect(res.status).toBe(200);
   });
 
   test('TC-Pat-05 patient1 requesting patient2 data gets 403', async () => {
@@ -63,17 +70,23 @@ describe('Patient management', () => {
     expect(res.status).toBe(403);
   });
 
-  // KNOWN DEFECT: SRS says a doctor with an appointment can view the patient (200). Route is patient-only.
-  test.failing('TC-Pat-06 doctor can view a patient who has an appointment with them', async () => {
+  test('TC-Pat-06 doctor can view a patient who has an appointment with them', async () => {
     db.setup([asUser('doctor'), ['FROM patients WHERE user_id', [profile]], ['FROM appointments', [{ id: 1 }]]]);
     const res = await request(app).get('/api/patients/5').set('Authorization', bearer('doctor', '9'));
     expect(res.status).toBe(200);
+    expect(res.body.patient.id).toBe('5');
   });
 
-  // KNOWN DEFECT: SRS says an administrator can view any patient profile. Route is patient-only.
-  test.failing('TC-Pat-07 administrator can view any patient profile', async () => {
+  test('doctor without an appointment cannot view a patient profile', async () => {
+    db.setup([asUser('doctor'), ['FROM appointments', []]]);
+    const res = await request(app).get('/api/patients/5').set('Authorization', bearer('doctor', '9'));
+    expect(res.status).toBe(403);
+  });
+
+  test('TC-Pat-07 administrator can view any patient profile', async () => {
     db.setup([asUser('admin'), ['FROM patients WHERE user_id', [profile]]]);
     const res = await request(app).get('/api/patients/5').set('Authorization', bearer('admin', '1'));
     expect(res.status).toBe(200);
+    expect(res.body.patient.id).toBe('5');
   });
 });
