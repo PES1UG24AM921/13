@@ -131,12 +131,12 @@ describe('Security and input validation', () => {
     expect(res.body.error).toBe('Unable to search doctors.');
   });
 
-  // KNOWN DEFECT (low): body over 16kb is rejected, but the error handler turns 413 into 500.
-  test.failing('TC-Rel-01c oversized request body (over 16kb) returns 413, not 500', async () => {
+  test('TC-Rel-01c oversized request body returns 413 with a clear message', async () => {
     const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
     db.setup([]);
     const res = await request(app).post('/api/auth/login').send({ email: 'a@x.com', password: 'x'.repeat(20000) });
     spy.mockRestore();
     expect(res.status).toBe(413);
+    expect(res.body).toEqual({ error: 'Request body must not exceed 16 KB.' });
   });
 });

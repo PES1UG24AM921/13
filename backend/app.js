@@ -34,7 +34,14 @@ app.use((error, req, res, next) => {
 	if (res.headersSent) {
 		return next(error);
 	}
-	const status = error.status === 400 ? 400 : 500;
+	const status = error.type === 'entity.too.large' && error.status === 413
+		? 413
+		: error.status === 400
+			? 400
+			: 500;
+	if (status === 413) {
+		return res.status(413).json({ error: 'Request body must not exceed 16 KB.' });
+	}
 	if (status === 400) {
 		return res.status(400).json({ error: 'Invalid request.' });
 	}
