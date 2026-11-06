@@ -55,6 +55,13 @@ function databaseError(res, error, action) {
 async function listUsers(req, res) {
   const limit = parseLimit(req.query.limit);
   const offset = parseOffset(req.query.offset);
+  const filters = [];
+  const values = [];
+  if (req.query.role) {
+    filters.push('u.role = ?');
+    values.push(req.query.role);
+  }
+  values.push(limit, offset);
   try {
     const [users] = await pool.execute(
       `SELECT CAST(u.id AS CHAR) AS id, u.email, u.role, u.is_active AS isActive,
@@ -64,9 +71,10 @@ async function listUsers(req, res) {
        FROM users u
        LEFT JOIN patients p ON p.user_id = u.id
        LEFT JOIN doctors d ON d.user_id = u.id
+       ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}
        ORDER BY u.created_at DESC, u.id DESC
        LIMIT ? OFFSET ?`,
-      [limit, offset],
+      values,
     );
     return res.status(200).json({ users, limit, offset });
   } catch (error) {
@@ -209,6 +217,25 @@ async function updateUserStatus(req, res) {
 async function listAppointments(req, res) {
   const limit = parseLimit(req.query.limit);
   const offset = parseOffset(req.query.offset);
+  const filters = [];
+  const values = [];
+  if (req.query.doctorId) {
+    filters.push('a.doctor_id = ?');
+    values.push(req.query.doctorId);
+  }
+  if (req.query.patientId) {
+    filters.push('a.patient_id = ?');
+    values.push(req.query.patientId);
+  }
+  if (req.query.date) {
+    filters.push('a.starts_at >= ? AND a.starts_at < DATE_ADD(?, INTERVAL 1 DAY)');
+    values.push(req.query.date, req.query.date);
+  }
+  if (req.query.status) {
+    filters.push('a.status = ?');
+    values.push(req.query.status);
+  }
+  values.push(limit, offset);
   try {
     const [appointments] = await pool.execute(
       `SELECT CAST(a.id AS CHAR) AS id,
@@ -222,9 +249,10 @@ async function listAppointments(req, res) {
        FROM appointments a
        JOIN patients p ON p.user_id = a.patient_id
        JOIN doctors d ON d.user_id = a.doctor_id
+       ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}
        ORDER BY a.starts_at DESC
        LIMIT ? OFFSET ?`,
-      [limit, offset],
+      values,
     );
     return res.status(200).json({ appointments, limit, offset });
   } catch (error) {

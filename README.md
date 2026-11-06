@@ -86,6 +86,7 @@ The repository contains the following Software Engineering deliverables:
 - **UML Diagrams** – Use-case, class, sequence, activity, component and other system diagrams
 - **Test Plan** – Testing strategy, test cases and test execution
 - **RTM** – Requirements Traceability Matrix
+- **Current SAD revision** – [`docs/SAD/SAD_SE.md`](docs/SAD/SAD_SE.md), aligned with the implemented services and access-control rules. The original PDF is retained as a submitted artifact.
 
 ## Testing
 
@@ -125,6 +126,25 @@ Availability creation and updates are restricted to doctor accounts. The body re
 - `GET /api/records` and `GET /api/records/:recordId` let patients view only their own records. Doctors can view records only for patients with whom they have an appointment.
 - `PUT /api/records/:recordId` lets a doctor update a record only when they have an appointment with that record's patient. Patients cannot create, update, or delete records. Deletion is not supported.
 - Invalid input returns `400`, missing authentication returns `401`, and authenticated users without the required role or patient access receive `403`.
+
+The API rejects JSON request bodies larger than 16 KB with `413 Payload Too Large` and a clear error response.
+
+## Patient profile API
+
+- `GET /api/patients/me` and `PUT /api/patients/me` are restricted to the authenticated patient. Profile updates accept valid `YYYY-MM-DD` dates of birth no later than today and phone numbers containing 7-15 digits with optional standard separators.
+- `GET /api/patients/:patientId` is available to patients, doctors, and administrators. Patients can view only their own profile, doctors must have an appointment with the patient, and administrators can view any patient. Profile updates remain patient-only.
+
+## Administrator management
+
+- The administrator workspace at `/users` supports creating patient and doctor accounts, filtering the account list by role, and activating or deactivating accounts. An administrator cannot deactivate their own account.
+- The administrator appointments view at `/appointments` supports filtering by doctor ID, patient ID, appointment date, and status; administrators can cancel scheduled appointments. The `/audit` page shows recorded administrative events.
+- The corresponding API list filters are `GET /api/admin/users?role=patient|doctor|admin` and `GET /api/admin/appointments?doctorId=…&patientId=…&date=YYYY-MM-DD&status=Scheduled|Completed|Cancelled|NoShow`. All administrator APIs require an active administrator account.
+
+## CI and pull request workflow
+
+- GitHub Actions runs the backend lint and Jest suite and builds the frontend on pushes to `main` and pull requests targeting `main`. The backend and frontend jobs must both pass.
+- Submit changes through a pull request, use the checklist in `.github/pull_request_template.md`, and request review from another team member. Before merging, repository maintainers should enable branch protection for `main`: require a pull request, at least one approval, and successful `backend` and `frontend` checks; do not allow bypassing these requirements for routine changes.
+- Keep secrets in GitHub Actions secrets or local environment files; never add credentials or real patient data to the repository. CI uses lockfile-based `npm ci` and does not require application secrets.
 
 ## Database integrity, transactions, and backups
 
