@@ -15,7 +15,10 @@ const pagination = [
 	validateRequest,
 ];
 
-router.get('/users', pagination, adminController.listUsers);
+router.get('/users', [
+	query('role').optional().isIn(['admin', 'doctor', 'patient']),
+	...pagination,
+], adminController.listUsers);
 router.post('/users', [
 	body('role').isString().bail().trim().toLowerCase().isIn(['doctor', 'patient']),
 	body('email').isEmail().normalizeEmail(),
@@ -38,7 +41,13 @@ router.patch('/users/:id/status', [
 	validateRequest,
 ], adminController.updateUserStatus);
 
-router.get('/appointments', pagination, adminController.listAppointments);
+router.get('/appointments', [
+	query('doctorId').optional().isInt({ min: 1, max: Number.MAX_SAFE_INTEGER }).toInt(),
+	query('patientId').optional().isInt({ min: 1, max: Number.MAX_SAFE_INTEGER }).toInt(),
+	query('status').optional().isIn(['Scheduled', 'Completed', 'Cancelled', 'NoShow']),
+	query('date').optional().matches(/^\d{4}-\d{2}-\d{2}$/).bail().isISO8601({ strict: true }),
+	...pagination,
+], adminController.listAppointments);
 router.get('/appointments/:appointmentId', param('appointmentId').isInt({ min: 1 }), validateRequest, adminController.getAppointment);
 router.patch('/appointments/:appointmentId/cancel', adminController.cancelAppointment);
 
