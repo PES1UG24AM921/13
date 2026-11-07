@@ -41,6 +41,10 @@ function parseAppointmentStart(value) {
   return { date, startsAt, endsAt, startTime, endTime, weekday };
 }
 
+function isAppointmentStartInPast(slot) {
+  return new Date(`${slot.startsAt.replace(' ', 'T')}Z`).getTime() <= Date.now();
+}
+
 function parsePositiveId(value) {
   if (typeof value !== 'string' || !/^\d+$/.test(value)) {
     return null;
@@ -74,7 +78,7 @@ async function bookAppointment(req, res) {
   if (req.body?.patientId !== undefined && String(req.body.patientId) !== String(req.user.id)) {
     return res.status(403).json({ error: 'You may only book appointments for yourself.' });
   }
-  if (!doctorId || !slot) {
+  if (!doctorId || !slot || isAppointmentStartInPast(slot)) {
     return res.status(400).json({ error: 'Provide a valid doctorId and half-hour-aligned startsAt.' });
   }
   const requestedStart = new Date(`${slot.startsAt.replace(' ', 'T')}Z`);
@@ -222,7 +226,7 @@ async function getAppointment(req, res) {
 async function rescheduleAppointment(req, res) {
   const appointmentId = parsePositiveId(req.params.appointmentId);
   const slot = parseAppointmentStart(req.body?.startsAt);
-  if (!appointmentId || !slot) {
+  if (!appointmentId || !slot || isAppointmentStartInPast(slot)) {
     return res.status(400).json({ error: 'Provide a valid appointmentId and half-hour-aligned startsAt.' });
   }
 
