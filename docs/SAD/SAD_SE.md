@@ -2,9 +2,9 @@
 
 **System:** Hospital Management System (HMS)
 **Revision:** Implementation-aligned update, November 2026
-**Status:** Current editable architecture description
+**Status:** Architecture summary. The final SAD is available in [PDF](SAD_SE.pdf) and [Word](SAD_SE.docx).
 
-This revision updates the architecture represented by [`SAD_SE.pdf`](./SAD_SE.pdf) to match the code in this repository. The PDF remains the original submitted artifact; this document is the current implementation-aligned SAD.
+The final SAD contains the full architecture, API contracts and three sequence diagrams. This summary describes the main components and the appointment booking flow.
 
 ## 1. Scope and architecture
 
