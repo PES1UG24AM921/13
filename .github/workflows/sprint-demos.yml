@@ -52,9 +52,9 @@ jobs:
         run: |
           npm ci --fetch-retries=1 --fetch-timeout=30000 --prefix snapshot/backend
           npm ci --fetch-retries=1 --fetch-timeout=30000 --prefix snapshot/frontend
-          npm install --prefix capture-run --no-save playwright@1.56.1
+          npm install --prefix capture-run --no-save playwright@1.56.1 @ffmpeg-installer/linux-x64 @ffprobe-installer/linux-x64
           ./capture-run/node_modules/.bin/playwright install chromium
-          command -v ffmpeg || (sudo apt-get update && sudo apt-get install -y ffmpeg)
+          printf "%s\n%s\n" "$GITHUB_WORKSPACE/capture-run/node_modules/@ffmpeg-installer/linux-x64" "$GITHUB_WORKSPACE/capture-run/node_modules/@ffprobe-installer/linux-x64" >> "$GITHUB_PATH"
       - name: Initialize and start the snapshot
         run: |
           docker exec -i "${{ job.services.mysql.id }}" mysql -uroot "-p$DB_PASSWORD" < snapshot/database/schema.sql
@@ -72,7 +72,7 @@ jobs:
       - name: Encode and verify the MP4
         run: |
           ffmpeg -nostdin -hide_banner -loglevel error -y -i capture-output/sprint.webm \
-            -vf 'fps=30,tpad=stop_mode=clone:stop_duration=4' -t "${{ matrix.seconds }}" \
+            -vf 'fps=30' -t "${{ matrix.seconds }}" \
             -c:v libx264 -pix_fmt yuv420p -preset fast -crf 23 -movflags +faststart \
             "capture-output/HMS_Sprint_${{ matrix.sprint }}_Demo.mp4"
           ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 \
