@@ -60,11 +60,15 @@ async function main() {
   const doctorToken = await login('doctor.one@example.test');
   const patientTokens = [await login('patient.one@example.test'), await login('patient.two@example.test')];
 
-  const doctorsRes = await fetch(`${BASE}/api/doctors`);
-  const doctor = (await doctorsRes.json()).doctors.find((d) => d.licenseNumber === 'HMS-DOC-001');
+  const doctorsRes = await fetch(`${BASE}/api/doctors?limit=100`, {
+    headers: { Authorization: `Bearer ${doctorToken}` },
+  });
+  if (!doctorsRes.ok) throw new Error(`Doctor lookup failed (status ${doctorsRes.status}).`);
+  const { doctors } = await doctorsRes.json();
+  const doctor = doctors?.find((d) => d.licenseNumber === 'HMS-DOC-001');
   if (!doctor) throw new Error('Seeded doctor HMS-DOC-001 not found. Run npm run seed.');
 
-  // Give the doctor availability on every weekday, 09:00 to 17:00. 409 means it already exists.
+  // Give the doctor availability on every day, 09:00 to 17:00. 409 means it already exists.
   const effectiveFrom = dateOffset(0);
   const setup = [];
   for (let day = 1; day <= 7; day += 1) {
@@ -72,14 +76,18 @@ async function main() {
       setup.push(call('POST', '/api/doctors/availability', { token: doctorToken, body: { dayOfWeek: day, startTime, effectiveFrom } }));
     }
   }
-  await Promise.all(setup);
+  const setupResults = await Promise.all(setup);
+  const failedSetup = setupResults.filter(({ status }) => status !== 201 && status !== 409);
+  if (failedSetup.length) {
+    throw new Error(`Availability setup failed for ${failedSetup.length} requests (first status ${failedSetup[0].status}).`);
+  }
 
   const results = [];
   const operations = [
-    { name: 'GET /api/doctors (search)', weight: 40, run: () => call('GET', '/api/doctors?specialty=Cardio') },
-    { name: 'GET /api/doctors/:id/slots', weight: 30, run: () => call('GET', `/api/doctors/${doctor.id}/slots?date=${dateOffset(1 + Math.floor(Math.random() * 7))}`) },
-    { name: 'GET /api/appointments', weight: 15, run: () => call('GET', '/api/appointments', { token: pick(patientTokens) }) },
-    { name: 'POST /api/appointments (book)', weight: 15, run: () => call('POST', '/api/appointments', { token: pick(patientTokens), body: { doctorId: Number(doctor.id), startsAt: `${dateOffset(1 + Math.floor(Math.random() * 7))} ${pick(TIMES)}`, reason: 'load test' } }) },
+    { name: 'GET /api/doctors (search)', weight: 40, expected: [200], run: () => call('GET', '/api/doctors?specialty=Cardio', { token: pick(patientTokens) }) },
+    { name: 'GET /api/doctors/:id/slots', weight: 30, expected: [200], run: () => call('GET', `/api/doctors/${doctor.id}/slots?date=${dateOffset(1 + Math.floor(Math.random() * 7))}`, { token: pick(patientTokens) }) },
+    { name: 'GET /api/appointments', weight: 15, expected: [200], run: () => call('GET', '/api/appointments', { token: pick(patientTokens) }) },
+    { name: 'POST /api/appointments (book)', weight: 15, expected: [201, 409], run: () => call('POST', '/api/appointments', { token: pick(patientTokens), body: { doctorId: Number(doctor.id), startsAt: `${dateOffset(1 + Math.floor(Math.random() * 7))} ${pick(TIMES)}`, reason: 'load test' } }) },
   ];
   const bag = operations.flatMap((op) => Array(op.weight).fill(op));
 
@@ -90,7 +98,7 @@ async function main() {
     while (performance.now() < endAt) {
       const op = pick(bag);
       const r = await op.run();
-      results.push({ op: op.name, ...r });
+      results.push({ op: op.name, unexpected: !op.expected.includes(r.status), ...r });
     }
   }
   await Promise.all(Array.from({ length: USERS }, virtualUser));
@@ -113,7 +121,7 @@ async function main() {
 
   const all = results.map((r) => r.ms);
   const within = all.filter((ms) => ms <= LIMIT_MS).length;
-  const serverErrors = results.filter((r) => r.status === 0 || r.status >= 500).length;
+  const unexpectedResponses = results.filter((r) => r.unexpected).length;
   const p95 = Math.round(pct(all, 95));
   const share = (within / all.length) * 100;
   console.log('\nEnvironment');
@@ -121,9 +129,10 @@ async function main() {
   console.log('\nResult');
   console.log(`  Concurrent users: ${USERS}, duration: ${elapsed.toFixed(1)} s, total requests: ${all.length} (${(all.length / elapsed).toFixed(1)} per second)`);
   console.log(`  Requests under ${LIMIT_MS} ms: ${share.toFixed(2)}%   95th percentile: ${p95} ms   slowest: ${Math.round(Math.max(...all))} ms`);
-  console.log(`  Network errors or 5xx responses: ${serverErrors}`);
-  console.log('  (409 and 400 on bookings are expected: slots fill up or are not on offer.)');
-  console.log(`\nTC-Perf-01 (95% under 2 s): ${share >= 95 && serverErrors === 0 ? 'PASS' : 'FAIL'}`);
+  console.log(`  Unexpected statuses or network errors: ${unexpectedResponses}`);
+  console.log('  (409 is expected when a slot is already booked or unavailable.)');
+  console.log(`\nTC-Perf-01 (95% under 2 s): ${share >= 95 && unexpectedResponses === 0 ? 'PASS' : 'FAIL'}`);
+  if (share < 95 || unexpectedResponses > 0 || results.length === 0) process.exitCode = 1;
 }
 
 main().catch((error) => {
