@@ -1,0 +1,101 @@
+name: Record HMS sprint demos
+
+on:
+  push:
+    branches: [capture/sprint-demos]
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sprint: 1
+            ref: 3b328b1f8220477d431c16c5deba411b13609735
+            seconds: 60
+          - sprint: 2
+            ref: 8363c76dcfc42035e876190740e2d91d36c08424
+            seconds: 120
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: local-demo-database-2026
+          MYSQL_ROOT_HOST: '%'
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      DB_HOST: 127.0.0.1
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: local-demo-database-2026
+      DB_NAME: hms
+      JWT_SECRET: disposable-sprint-demo-local-capture-only
+      SEED_PASSWORD: LocalDemoPatient42!
+      PORT: 3000
+      FRONTEND_ORIGIN: http://localhost:5173
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+          path: snapshot
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install snapshot dependencies
+        run: |
+          npm ci --prefix snapshot/backend
+          npm ci --prefix snapshot/frontend
+          npm install --prefix capture-run --no-save playwright@1.56.1
+          ./capture-run/node_modules/.bin/playwright install --with-deps chromium
+          command -v ffmpeg || (sudo apt-get update && sudo apt-get install -y ffmpeg)
+      - name: Initialize and start the snapshot
+        run: |
+          docker exec -i "${{ job.services.mysql.id }}" mysql -uroot "-p$DB_PASSWORD" < snapshot/database/schema.sql
+          npm run seed --prefix snapshot/backend
+          npm start --prefix snapshot/backend > backend.log 2>&1 &
+          npm run dev --prefix snapshot/frontend -- --port 5173 --strictPort > frontend.log 2>&1 &
+          for i in {1..35}; do
+            if curl -fsS http://localhost:5173/ > /dev/null && curl -sS http://127.0.0.1:3000/ > /dev/null; then exit 0; fi
+            sleep 1
+          done
+          cat backend.log frontend.log
+          exit 1
+      - name: Capture the real app
+        run: node .github/demo/capture.cjs "${{ matrix.sprint }}" "${{ matrix.ref }}" "${{ matrix.seconds }}"
+      - name: Encode and verify the MP4
+        run: |
+          ffmpeg -nostdin -hide_banner -loglevel error -y -i capture-output/sprint.webm \
+            -vf 'fps=30,tpad=stop_mode=clone:stop_duration=4' -t "${{ matrix.seconds }}" \
+            -c:v libx264 -pix_fmt yuv420p -preset fast -crf 23 -movflags +faststart \
+            "capture-output/HMS_Sprint_${{ matrix.sprint }}_Demo.mp4"
+          ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 \
+            "capture-output/HMS_Sprint_${{ matrix.sprint }}_Demo.mp4"
+          ffmpeg -nostdin -v error -ss 18 -i "capture-output/HMS_Sprint_${{ matrix.sprint }}_Demo.mp4" \
+            -frames:v 1 "capture-output/HMS_Sprint_${{ matrix.sprint }}_Preview.png"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hms-sprint-${{ matrix.sprint }}-demo
+          path: |
+            capture-output/HMS_Sprint_${{ matrix.sprint }}_Demo.mp4
+            capture-output/HMS_Sprint_${{ matrix.sprint }}_Preview.png
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: hms-sprint-${{ matrix.sprint }}-diagnostics
+          path: |
+            backend.log
+            frontend.log
+            capture-output/error.png
+          retention-days: 2
