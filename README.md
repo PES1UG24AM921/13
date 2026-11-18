@@ -86,7 +86,7 @@ The repository contains the following Software Engineering deliverables:
 - **UML Diagrams** – Use-case, class, sequence, activity, component and other system diagrams
 - **Test Plan** – Testing strategy, test cases and test execution
 - **RTM** – Requirements Traceability Matrix
-- **Current SAD revision** – [`docs/SAD/SAD_SE.md`](docs/SAD/SAD_SE.md), aligned with the implemented services and access-control rules. The original PDF is retained as a submitted artifact.
+- **[Final submission documents](docs/README.md)** - Revised SRS, SAD and Test Plan, traceability, the four test reports, and the final presentation.
 
 ## Testing
 
