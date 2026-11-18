@@ -18,9 +18,6 @@ jobs:
           - sprint: 1
             ref: 3b328b1f8220477d431c16c5deba411b13609735
             seconds: 60
-          - sprint: 2
-            ref: 8363c76dcfc42035e876190740e2d91d36c08424
-            seconds: 120
     services:
       mysql:
         image: mysql:8.0
@@ -53,10 +50,10 @@ jobs:
           node-version: 22
       - name: Install snapshot dependencies
         run: |
-          npm ci --prefix snapshot/backend
-          npm ci --prefix snapshot/frontend
+          npm ci --fetch-retries=1 --fetch-timeout=30000 --prefix snapshot/backend
+          npm ci --fetch-retries=1 --fetch-timeout=30000 --prefix snapshot/frontend
           npm install --prefix capture-run --no-save playwright@1.56.1
-          ./capture-run/node_modules/.bin/playwright install --with-deps chromium
+          ./capture-run/node_modules/.bin/playwright install chromium
           command -v ffmpeg || (sudo apt-get update && sudo apt-get install -y ffmpeg)
       - name: Initialize and start the snapshot
         run: |
