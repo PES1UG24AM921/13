@@ -15,7 +15,11 @@ const pagination = [
 	validateRequest,
 ];
 
-router.get('/users', pagination, adminController.listUsers);
+router.get('/users', [
+	query('role').optional().isIn(['admin', 'doctor', 'patient']),
+	...pagination,
+], adminController.listUsers);
+router.get('/me', adminController.getMyProfile);
 router.post('/users', [
 	body('role').isString().bail().trim().toLowerCase().isIn(['doctor', 'patient']),
 	body('email').isEmail().normalizeEmail(),
@@ -37,8 +41,25 @@ router.patch('/users/:id/status', [
 		&& (typeof value.is_active === 'boolean' || typeof value.isActive === 'boolean')),
 	validateRequest,
 ], adminController.updateUserStatus);
+router.put('/users/:id', [
+	param('id').isInt({ min: 1 }),
+	body('email').optional().isEmail().normalizeEmail(),
+	body('firstName').optional().isString().bail().trim().isLength({ min: 1, max: 100 }),
+	body('lastName').optional().isString().bail().trim().isLength({ min: 1, max: 100 }),
+	body('dateOfBirth').optional({ nullable: true }).isISO8601({ strict: true }),
+	body('phone').optional({ nullable: true }).isString().bail().trim().isLength({ max: 32 }),
+	body('licenseNumber').optional().isString().bail().trim().isLength({ min: 1, max: 100 }),
+	body('specialty').optional().isString().bail().trim().isLength({ min: 1, max: 150 }),
+	validateRequest,
+], adminController.updateUser);
 
-router.get('/appointments', pagination, adminController.listAppointments);
+router.get('/appointments', [
+	query('doctorId').optional().isInt({ min: 1, max: Number.MAX_SAFE_INTEGER }).toInt(),
+	query('patientId').optional().isInt({ min: 1, max: Number.MAX_SAFE_INTEGER }).toInt(),
+	query('status').optional().isIn(['Scheduled', 'Completed', 'Cancelled', 'NoShow']),
+	query('date').optional().matches(/^\d{4}-\d{2}-\d{2}$/).bail().isISO8601({ strict: true }),
+	...pagination,
+], adminController.listAppointments);
 router.get('/appointments/:appointmentId', param('appointmentId').isInt({ min: 1 }), validateRequest, adminController.getAppointment);
 router.patch('/appointments/:appointmentId/cancel', adminController.cancelAppointment);
 

@@ -1,4 +1,5 @@
 const pool = require('../db');
+const appointmentModel = require('../models/appointmentModel');
 
 const SLOT_MINUTES = 30;
 const START_PATTERN = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/;
@@ -52,71 +53,23 @@ function parsePositiveId(value) {
   return Number.isSafeInteger(parsed) && parsed > 0 ? String(parsed) : null;
 }
 
-async function lockBookingActors(connection, patientId, doctorId) {
-  const [doctors] = await connection.execute(
-    `SELECT d.user_id FROM doctors d
-     JOIN users u ON u.id = d.user_id
-     WHERE d.user_id = ? AND u.is_active = TRUE
-     FOR UPDATE`,
-    [doctorId],
-  );
-  if (!doctors[0]) {
-    return { error: 'Doctor not found.' };
-  }
-
-  const [patients] = await connection.execute(
-    `SELECT p.user_id FROM patients p
-     JOIN users u ON u.id = p.user_id
-     WHERE p.user_id = ? AND u.is_active = TRUE
-     FOR UPDATE`,
-    [patientId],
-  );
-  if (!patients[0]) {
-    return { error: 'Patient profile not found.' };
-  }
-  return {};
-}
-
-async function lockAvailableSlot(connection, doctorId, slot) {
-  const [availability] = await connection.execute(
-    `SELECT id FROM availability
-     WHERE doctor_id = ? AND day_of_week = ?
-       AND effective_from <= ?
-       AND (effective_to IS NULL OR effective_to >= ?)
-       AND start_time <= ? AND end_time >= ?
-     LIMIT 1 FOR UPDATE`,
-    [doctorId, slot.weekday, slot.date, slot.date, slot.startTime, slot.endTime],
-  );
-  return availability.length > 0;
-}
-
-async function lockConflictingAppointment(connection, patientId, doctorId, slot, excludeId = null) {
-  const exclusion = excludeId === null ? '' : 'AND id <> ?';
-  const values = [
-    doctorId, slot.endsAt, slot.startsAt,
-    patientId, slot.endsAt, slot.startsAt,
-  ];
-  if (excludeId !== null) {
-    values.push(excludeId);
-  }
-  const [appointments] = await connection.execute(
-    `SELECT id FROM appointments
-     WHERE status = 'Scheduled'
-       AND ((doctor_id = ? AND starts_at < ? AND ends_at > ?)
-         OR (patient_id = ? AND starts_at < ? AND ends_at > ?))
-       ${exclusion}
-     LIMIT 1 FOR UPDATE`,
-    values,
-  );
-  return appointments.length > 0;
-}
-
 function sendDatabaseError(res, error, action) {
   if (error.code === 'ER_DUP_ENTRY') {
     return res.status(409).json({ error: 'The patient or doctor already has an appointment at that time.' });
   }
   console.error(`${action} failed:`, error.message);
   return res.status(500).json({ error: `Unable to ${action}.` });
+}
+
+async function rollbackTransaction(connection) {
+  try {
+    await connection.rollback();
+    return true;
+  } catch (error) {
+    console.error('Appointment transaction rollback failed:', error.message);
+    connection.destroy();
+    return false;
+  }
 }
 
 async function bookAppointment(req, res) {
@@ -128,6 +81,10 @@ async function bookAppointment(req, res) {
   if (!doctorId || !slot || isAppointmentStartInPast(slot)) {
     return res.status(400).json({ error: 'Provide a valid doctorId and half-hour-aligned startsAt.' });
   }
+  const requestedStart = new Date(`${slot.startsAt.replace(' ', 'T')}Z`);
+  if (requestedStart <= new Date()) {
+    return res.status(400).json({ error: 'startsAt must be a future date and time.' });
+  }
   const reason = req.body?.reason ?? null;
   if (reason !== null && (typeof reason !== 'string' || reason.length > 1000)) {
     return res.status(400).json({ error: 'reason must be a string of at most 1000 characters.' });
@@ -137,36 +94,44 @@ async function bookAppointment(req, res) {
   let transactionStarted = false;
   try {
     connection = await pool.getConnection();
-    await connection.beginTransaction();
     transactionStarted = true;
+    await connection.beginTransaction();
 
-    const actorError = await lockBookingActors(connection, req.user.id, doctorId);
+    const actorError = await appointmentModel.lockBookingActors(connection, req.user.id, doctorId);
     if (actorError.error) {
-      await connection.rollback();
+      if (!(await rollbackTransaction(connection))) {
+        connection = null;
+        transactionStarted = false;
+        return res.status(500).json({ error: 'Unable to book appointment.' });
+      }
       transactionStarted = false;
       return res.status(404).json({ error: actorError.error });
     }
-    if (!(await lockAvailableSlot(connection, doctorId, slot))) {
-      await connection.rollback();
+    if (!(await appointmentModel.lockAvailableSlot(connection, doctorId, slot))) {
+      if (!(await rollbackTransaction(connection))) {
+        connection = null;
+        transactionStarted = false;
+        return res.status(500).json({ error: 'Unable to book appointment.' });
+      }
       transactionStarted = false;
       return res.status(409).json({ error: 'The doctor is not available for that time.' });
     }
-    if (await lockConflictingAppointment(connection, req.user.id, doctorId, slot)) {
-      await connection.rollback();
+    if (await appointmentModel.lockConflictingAppointment(connection, req.user.id, doctorId, slot)) {
+      if (!(await rollbackTransaction(connection))) {
+        connection = null;
+        transactionStarted = false;
+        return res.status(500).json({ error: 'Unable to book appointment.' });
+      }
       transactionStarted = false;
       return res.status(409).json({ error: 'The patient or doctor already has an appointment at that time.' });
     }
 
-    const [result] = await connection.execute(
-      `INSERT INTO appointments (patient_id, doctor_id, starts_at, ends_at, reason)
-       VALUES (?, ?, ?, ?, ?)`,
-      [req.user.id, doctorId, slot.startsAt, slot.endsAt, reason],
-    );
+    const appointmentId = await appointmentModel.create(connection, req.user.id, doctorId, slot, reason);
     await connection.commit();
     transactionStarted = false;
     return res.status(201).json({
       appointment: {
-        id: String(result.insertId),
+        id: String(appointmentId),
         patientId: String(req.user.id),
         doctorId,
         startsAt: slot.startsAt,
@@ -177,7 +142,10 @@ async function bookAppointment(req, res) {
     });
   } catch (error) {
     if (transactionStarted) {
-      await connection.rollback();
+      if (!(await rollbackTransaction(connection))) {
+        connection = null;
+      }
+      transactionStarted = false;
     }
     return sendDatabaseError(res, error, 'book appointment');
   } finally {
@@ -202,11 +170,16 @@ async function getMyAppointments(req, res) {
     const [appointments] = await pool.execute(
       `SELECT CAST(a.id AS CHAR) AS id,
               CAST(a.patient_id AS CHAR) AS patientId,
+              CONCAT(p.first_name, ' ', p.last_name) AS patientName,
               CAST(a.doctor_id AS CHAR) AS doctorId,
+              d.specialty AS doctorName,
+              d.specialty AS doctorSpecialty,
               DATE_FORMAT(a.starts_at, '%Y-%m-%d %H:%i:%s') AS startsAt,
               DATE_FORMAT(a.ends_at, '%Y-%m-%d %H:%i:%s') AS endsAt,
               a.status, a.reason
        FROM appointments a
+       JOIN patients p ON p.user_id = a.patient_id
+       JOIN doctors d ON d.user_id = a.doctor_id
        WHERE ${condition}
        ORDER BY a.starts_at DESC
        LIMIT ? OFFSET ?`,
@@ -266,8 +239,8 @@ async function rescheduleAppointment(req, res) {
   let transactionStarted = false;
   try {
     connection = await pool.getConnection();
-    await connection.beginTransaction();
     transactionStarted = true;
+    await connection.beginTransaction();
 
     const [appointments] = await connection.execute(
       `SELECT id, doctor_id AS doctorId, status
@@ -278,35 +251,59 @@ async function rescheduleAppointment(req, res) {
     );
     const appointment = appointments[0];
     if (!appointment) {
-      await connection.rollback();
+      if (!(await rollbackTransaction(connection))) {
+        connection = null;
+        transactionStarted = false;
+        return res.status(500).json({ error: 'Unable to reschedule appointment.' });
+      }
       transactionStarted = false;
       return res.status(404).json({ error: 'Appointment not found.' });
     }
     if (appointment.status !== 'Scheduled') {
-      await connection.rollback();
+      if (!(await rollbackTransaction(connection))) {
+        connection = null;
+        transactionStarted = false;
+        return res.status(500).json({ error: 'Unable to reschedule appointment.' });
+      }
       transactionStarted = false;
       return res.status(409).json({ error: 'Only scheduled appointments can be rescheduled.' });
     }
 
-    const actorError = await lockBookingActors(connection, req.user.id, String(appointment.doctorId));
+    const actorError = await appointmentModel.lockBookingActors(
+      connection,
+      req.user.id,
+      String(appointment.doctorId),
+    );
     if (actorError.error) {
-      await connection.rollback();
+      if (!(await rollbackTransaction(connection))) {
+        connection = null;
+        transactionStarted = false;
+        return res.status(500).json({ error: 'Unable to reschedule appointment.' });
+      }
       transactionStarted = false;
       return res.status(404).json({ error: actorError.error });
     }
-    if (!(await lockAvailableSlot(connection, String(appointment.doctorId), slot))) {
-      await connection.rollback();
+    if (!(await appointmentModel.lockAvailableSlot(connection, String(appointment.doctorId), slot))) {
+      if (!(await rollbackTransaction(connection))) {
+        connection = null;
+        transactionStarted = false;
+        return res.status(500).json({ error: 'Unable to reschedule appointment.' });
+      }
       transactionStarted = false;
       return res.status(409).json({ error: 'The doctor is not available for that time.' });
     }
-    if (await lockConflictingAppointment(
+    if (await appointmentModel.lockConflictingAppointment(
       connection,
       req.user.id,
       String(appointment.doctorId),
       slot,
       appointmentId,
     )) {
-      await connection.rollback();
+      if (!(await rollbackTransaction(connection))) {
+        connection = null;
+        transactionStarted = false;
+        return res.status(500).json({ error: 'Unable to reschedule appointment.' });
+      }
       transactionStarted = false;
       return res.status(409).json({ error: 'The patient or doctor already has an appointment at that time.' });
     }
@@ -329,7 +326,10 @@ async function rescheduleAppointment(req, res) {
     });
   } catch (error) {
     if (transactionStarted) {
-      await connection.rollback();
+      if (!(await rollbackTransaction(connection))) {
+        connection = null;
+      }
+      transactionStarted = false;
     }
     return sendDatabaseError(res, error, 'reschedule appointment');
   } finally {
@@ -349,8 +349,8 @@ async function cancelAppointment(req, res) {
   let transactionStarted = false;
   try {
     connection = await pool.getConnection();
-    await connection.beginTransaction();
     transactionStarted = true;
+    await connection.beginTransaction();
 
     const [appointments] = await connection.execute(
       `SELECT status FROM appointments
@@ -359,12 +359,20 @@ async function cancelAppointment(req, res) {
       [appointmentId, req.user.id],
     );
     if (!appointments[0]) {
-      await connection.rollback();
+      if (!(await rollbackTransaction(connection))) {
+        connection = null;
+        transactionStarted = false;
+        return res.status(500).json({ error: 'Unable to cancel appointment.' });
+      }
       transactionStarted = false;
       return res.status(404).json({ error: 'Appointment not found.' });
     }
     if (appointments[0].status !== 'Scheduled') {
-      await connection.rollback();
+      if (!(await rollbackTransaction(connection))) {
+        connection = null;
+        transactionStarted = false;
+        return res.status(500).json({ error: 'Unable to cancel appointment.' });
+      }
       transactionStarted = false;
       return res.status(409).json({ error: 'Only scheduled appointments can be cancelled.' });
     }
@@ -379,7 +387,10 @@ async function cancelAppointment(req, res) {
     return res.status(200).json({ id: appointmentId, status: 'Cancelled' });
   } catch (error) {
     if (transactionStarted) {
-      await connection.rollback();
+      if (!(await rollbackTransaction(connection))) {
+        connection = null;
+      }
+      transactionStarted = false;
     }
     return sendDatabaseError(res, error, 'cancel appointment');
   } finally {

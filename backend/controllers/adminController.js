@@ -55,22 +55,118 @@ function databaseError(res, error, action) {
 async function listUsers(req, res) {
   const limit = parseLimit(req.query.limit);
   const offset = parseOffset(req.query.offset);
+  const filters = [];
+  const values = [];
+  if (req.query.role) {
+    filters.push('u.role = ?');
+    values.push(req.query.role);
+  }
+  values.push(limit, offset);
   try {
     const [users] = await pool.execute(
       `SELECT CAST(u.id AS CHAR) AS id, u.email, u.role, u.is_active AS isActive,
               DATE_FORMAT(u.created_at, '%Y-%m-%d %H:%i:%s') AS createdAt,
               p.first_name AS firstName, p.last_name AS lastName,
+              DATE_FORMAT(p.date_of_birth, '%Y-%m-%d') AS dateOfBirth,
+              COALESCE(p.phone, d.phone) AS phone,
               d.license_number AS licenseNumber, d.specialty
        FROM users u
        LEFT JOIN patients p ON p.user_id = u.id
        LEFT JOIN doctors d ON d.user_id = u.id
+       ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}
        ORDER BY u.created_at DESC, u.id DESC
        LIMIT ? OFFSET ?`,
-      [limit, offset],
+      values,
     );
     return res.status(200).json({ users, limit, offset });
   } catch (error) {
     return databaseError(res, error, 'list users');
+  }
+}
+
+async function getMyProfile(req, res) {
+  try {
+    const [users] = await pool.execute(
+      `SELECT CAST(u.id AS CHAR) AS id, u.email, u.role,
+              DATE_FORMAT(u.created_at, '%Y-%m-%d %H:%i:%s') AS createdAt
+       FROM users u WHERE u.id = ? AND u.role = 'admin'`,
+      [req.user.id],
+    );
+    if (!users[0]) return res.status(404).json({ error: 'Administrator profile not found.' });
+    return res.status(200).json({ user: users[0] });
+  } catch (error) {
+    return databaseError(res, error, 'load administrator profile');
+  }
+}
+
+async function updateUser(req, res) {
+  const userId = parseId(String(req.params.id ?? ''));
+  const body = req.body || {};
+  if (!userId) return res.status(400).json({ error: 'userId must be a positive integer.' });
+  const allowed = ['email', 'firstName', 'lastName', 'dateOfBirth', 'phone', 'licenseNumber', 'specialty'];
+  const fields = Object.keys(body);
+  if (!fields.length || fields.some((field) => !allowed.includes(field))) {
+    return res.status(400).json({ error: 'Provide one or more supported account fields.' });
+  }
+  if (body.dateOfBirth != null && !isValidDate(body.dateOfBirth)) {
+    return res.status(400).json({ error: 'dateOfBirth must be a valid YYYY-MM-DD date or null.' });
+  }
+
+  let connection;
+  let transactionStarted = false;
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    transactionStarted = true;
+    const [users] = await connection.execute(
+      'SELECT role FROM users WHERE id = ? FOR UPDATE',
+      [userId],
+    );
+    if (!users[0]) {
+      await connection.rollback(); transactionStarted = false;
+      return res.status(404).json({ error: 'User not found.' });
+    }
+    const role = users[0].role;
+    const email = body.email?.trim().toLowerCase();
+    if (email) await connection.execute('UPDATE users SET email = ? WHERE id = ?', [email, userId]);
+    const patientFields = ['firstName', 'lastName', 'dateOfBirth', 'phone'];
+    const doctorFields = ['licenseNumber', 'specialty', 'phone'];
+    const profileFields = role === 'patient' ? patientFields : role === 'doctor' ? doctorFields : [];
+    const profileUpdates = fields.filter((field) => profileFields.includes(field));
+    const mismatched = fields.some((field) => field !== 'email' && !profileFields.includes(field));
+    if (mismatched || (role === 'admin' && fields.some((field) => field !== 'email'))) {
+      await connection.rollback(); transactionStarted = false;
+      return res.status(400).json({ error: 'Fields do not match this account role.' });
+    }
+    if (profileUpdates.length) {
+      const table = role === 'patient' ? 'patients' : 'doctors';
+      const columns = {
+        firstName: 'first_name', lastName: 'last_name', dateOfBirth: 'date_of_birth',
+        phone: 'phone', licenseNumber: 'license_number', specialty: 'specialty',
+      };
+      const assignments = profileUpdates.map((field) => `${columns[field]} = ?`).join(', ');
+      const values = profileUpdates.map((field) => (
+        ['firstName', 'lastName', 'licenseNumber', 'specialty'].includes(field) && typeof body[field] === 'string'
+          ? body[field].trim() : body[field]
+      ));
+      await connection.execute(`UPDATE ${table} SET ${assignments} WHERE user_id = ?`, [...values, userId]);
+    }
+    await connection.commit(); transactionStarted = false;
+    const [updated] = await pool.execute(
+      `SELECT CAST(u.id AS CHAR) AS id, u.email, u.role, u.is_active AS isActive,
+              p.first_name AS firstName, p.last_name AS lastName,
+              DATE_FORMAT(p.date_of_birth, '%Y-%m-%d') AS dateOfBirth, COALESCE(p.phone, d.phone) AS phone,
+              d.license_number AS licenseNumber, d.specialty
+       FROM users u LEFT JOIN patients p ON p.user_id = u.id
+       LEFT JOIN doctors d ON d.user_id = u.id WHERE u.id = ?`,
+      [userId],
+    );
+    return res.status(200).json({ user: updated[0] });
+  } catch (error) {
+    if (transactionStarted) await connection.rollback();
+    return databaseError(res, error, 'update user details');
+  } finally {
+    if (connection) connection.release();
   }
 }
 
@@ -209,6 +305,25 @@ async function updateUserStatus(req, res) {
 async function listAppointments(req, res) {
   const limit = parseLimit(req.query.limit);
   const offset = parseOffset(req.query.offset);
+  const filters = [];
+  const values = [];
+  if (req.query.doctorId) {
+    filters.push('a.doctor_id = ?');
+    values.push(req.query.doctorId);
+  }
+  if (req.query.patientId) {
+    filters.push('a.patient_id = ?');
+    values.push(req.query.patientId);
+  }
+  if (req.query.date) {
+    filters.push('a.starts_at >= ? AND a.starts_at < DATE_ADD(?, INTERVAL 1 DAY)');
+    values.push(req.query.date, req.query.date);
+  }
+  if (req.query.status) {
+    filters.push('a.status = ?');
+    values.push(req.query.status);
+  }
+  values.push(limit, offset);
   try {
     const [appointments] = await pool.execute(
       `SELECT CAST(a.id AS CHAR) AS id,
@@ -222,9 +337,10 @@ async function listAppointments(req, res) {
        FROM appointments a
        JOIN patients p ON p.user_id = a.patient_id
        JOIN doctors d ON d.user_id = a.doctor_id
+       ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}
        ORDER BY a.starts_at DESC
        LIMIT ? OFFSET ?`,
-      [limit, offset],
+      values,
     );
     return res.status(200).json({ appointments, limit, offset });
   } catch (error) {
@@ -346,6 +462,8 @@ async function listAuditLogs(req, res) {
 
 module.exports = {
   listUsers,
+  getMyProfile,
+  updateUser,
   createUser,
   updateUserStatus,
   listAppointments,
